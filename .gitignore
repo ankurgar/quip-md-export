@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-e2e/
+dist-cli/
+.e2e-profile/
+.DS_Store
+*.log
+
+# Personal data captured from a real Quip account must never be committed.
+tests/fixtures/real/
+.quip-raw/
+_export-report.md
+*.local
+.env

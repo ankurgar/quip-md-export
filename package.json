@@ -1,0 +1,27 @@
+{
+  "name": "quip-md-export",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only Chrome (MV3) extension that replicates your Quip folder tree as Markdown files in a folder you choose.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:e2e": "node scripts/build.mjs --e2e",
+    "build:cli": "node scripts/build.mjs --cli",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "npm run build:e2e && node tests/e2e/browser.e2e.mjs",
+    "check": "npm run typecheck && npm run test"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/chrome": "^0.3.8",
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  }
+}
