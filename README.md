@@ -20,7 +20,7 @@ npm run build          # writes the extension to dist/
 
 For a first run, tick *Limit to the first N documents* and try 5. Keep the tab open while it runs; you can stop at any time and continue later, and finished documents are not downloaded again.
 
-**Keep the exporter tab on screen while it runs.** Browsers throttle and may freeze pages that are not visible. In Dia, an exporter tab whose window was not on screen (covered, minimized or on another desktop) made a request every 30 to 60 seconds and once paused for more than two minutes, where a visible tab makes several a second. Keep the exporter tab selected in a window you can see, or use the command line below, which does not depend on a tab.
+**Keep the exporter tab on screen while it runs.** Browsers throttle and may freeze pages that are not visible. In Dia, an exporter tab whose window was not on screen (covered, minimized or on another desktop) made a request every 30 to 60 seconds and once paused for more than two minutes, while the command line version, which has no tab to throttle, averaged about two requests a second. Keep the exporter tab selected in a window you can see, or use the command line below, which does not depend on a tab.
 
 ## Without a browser (command line)
 
