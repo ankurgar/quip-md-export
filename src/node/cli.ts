@@ -66,7 +66,7 @@ function planLines(plan: Plan): string[] {
   const unreadable = plan.unreadableFolders.length + plan.unreadableThreads.length;
   if (unreadable > 0) lines.push(`${unreadable} items cannot be read with this token and will be listed in the report.`);
   if (plan.unreadableFolders.length + plan.unreadableUnselected.length > 0) lines.push('Some folders cannot be read, so documents inside them may be exported under "_Unfiled".');
-  lines.push(`About ${plan.estimatedRequests} Quip API requests (Quip allows 50 a minute and 750 an hour).`);
+  lines.push(`About ${plan.estimatedRequests} Quip API requests. How long that takes depends on the speed Quip allows for your account; it is paced automatically.`);
   return lines;
 }
 

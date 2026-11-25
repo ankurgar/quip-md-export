@@ -1,40 +1,101 @@
 # Quip → Markdown exporter
 
-A Chrome (Manifest V3) extension that copies your Quip folders and documents into a folder on your computer as Markdown, keeping Quip's folder structure. It also converts embedded content that other exporters drop: **calendars, Kanban boards, project trackers, process bars, embedded and standalone spreadsheets**, comments, images and file attachments.
+A Chrome (Manifest V3) extension, and a command line version of the same code, that copy your Quip folders and documents into a folder on your computer as Markdown, keeping Quip's folder structure. It also converts embedded content that other exporters drop: **calendars, Kanban boards, project trackers, process bars, embedded and standalone spreadsheets**, comments, images and file attachments.
 
 **It is read-only.** It cannot create, edit or delete anything in Quip, and it never deletes files from your target folder or overwrites a file it did not create. See [Read-only guarantees](#read-only-guarantees).
 
 Quip is being retired. [Salesforce's notice](https://help.salesforce.com/s/articleView?id=005299603&language=en_US&type=1) says subscriptions cannot be renewed after 1 March 2027 and gives 31 March 2027 as the date after which an instance is no longer accessible; your own deadline is whichever applies to your account. Export while you can still sign in.
 
-## Quick start
+## Run it
+
+The extension and the command line are the same exporter, and both only ever send `GET` requests and write the same layout and report. **For the real export use the command line**: nothing has to stay on screen and there is no folder picker. It needs Node 22 or later (run on 22.17) and a Quip account that can create an API token. The examples write to `~/quip-export`; use a folder of its own (the root and your home folder are refused).
+
+**1. Install**
 
 ```bash
+cd quip-md-export
 npm ci
+```
+
+**2. Get a token.** While signed in to Quip, open `https://<your-site>.quip.com/dev/token` (or `quip.com/dev/token`), click **Get Personal Access Token** and copy it. Give it to your shell without echoing it or leaving it in your history:
+
+```bash
+read -rs QUIP_TOKEN && export QUIP_TOKEN    # paste, press Enter; nothing is shown
+```
+
+**3. Scan first.** Reads the folder structure and writes nothing:
+
+```bash
+npm run cli -- --out ~/quip-export --scan-only
+```
+
+```text
+Connected as Jane Doe (acme.quip.com).
+418 documents in 88 folders would be exported.
+About 851 Quip API requests. How long that takes depends on the speed Quip allows for your account; it is paced automatically.
+Nothing was written.
+```
+
+**4. Trial run.** Export one document or folder, then the first few, and open the notes to check them:
+
+```bash
+npm run cli -- --out ~/quip-export --from https://<your-site>.quip.com/<id>/Rental-Records
+npm run cli -- --out ~/quip-export --limit 5
+```
+
+**5. Export everything.** About 10 minutes for 418 documents. On a laptop, `caffeinate -i` keeps it from sleeping:
+
+```bash
+caffeinate -i npm run cli -- --out ~/quip-export
+```
+
+```text
+[export] Exporting 418 documents…
+[1/418] saved Private/Projects/Project Plan.md
+…
+Done. 418 saved, 0 unchanged, 0 failed of 418 documents.
+Attachments: 215 saved, 0 reused, 0 unavailable. Comments exported: 4.
+Embedded content converted: calendar 8, kanban 2, spreadsheet 82, video 1.
+Report: _Quip export report.md
+```
+
+**6. Check the result.**
+
+```bash
+open ~/quip-export/_Quip\ export\ report.md    # "Needs attention" lists warnings and links to documents outside the export
+find ~/quip-export -name '*.md' -not -path '*/.quip*' -not -name '_Quip export report.md' | wc -l    # number of notes
+```
+
+**7. Run again any time.** Ctrl-C stops safely. The same command continues where it stopped and fetches only what changed in Quip:
+
+```bash
+npm run cli -- --out ~/quip-export             # continue, or pick up changes
+npm run cli -- --out ~/quip-export --force     # export everything again
+```
+
+**8. When finished,** remove the token from your shell and retire it (see [Token handling](#token-handling)):
+
+```bash
+unset QUIP_TOKEN
+```
+
+Other options (`npm run cli -- --help`): `--no-comments`, `--no-raw` (skip Quip's original HTML), `--no-xlsx`, `--no-unfiled`, and `--token-stdin` to pipe the token in instead, for example `pbpaste | npm run cli -- --out ~/quip-export --token-stdin`. The token is never printed. Exit status: 0 done, 1 some documents failed, 2 bad arguments or nothing to export, 3 token rejected, 130 stopped.
+
+### Browser extension instead
+
+Same exporter behind a page. Build it, then load it:
+
+```bash
 npm run build          # writes the extension to dist/
 ```
 
-1. In Chrome or Edge open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, choose **Load unpacked** and pick the `dist/` folder. (The exporter uses an API token, not your browser session, so it works in any Chromium browser. In Dia 1.58 the extension loaded when Dia was started with `--load-extension=<path to dist>`, and its page and read-only guard worked; "Load unpacked" from Dia's own extensions page was not tried.)
-2. While signed in to Quip, open `https://<your-site>.quip.com/dev/token` (or `quip.com/dev/token`) and copy a personal access token. Generating a new token invalidates the previous one, [according to ClonePartner's guide](https://clonepartner.com/blog/how-to-export-data-from-quip-methods-api-limits-migration-prep).
-3. Click the extension's toolbar icon. If a Quip page is open when you click, you can export just that document or folder.
-4. Paste the token, **Connect**, **Choose folder…**, then **Scan** (nothing is written yet) and **Start export**.
+1. In Chrome or Edge open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, choose **Load unpacked** and pick `dist/`. It uses an API token, not your browser session, so any Chromium browser works. In Dia 1.58 it loaded when Dia was started with `open -a Dia --args --load-extension="$PWD/dist"` (quit Dia first; it lasts for that session; Dia's own *Load unpacked* was not tried).
+2. Get a token as in step 2 above.
+3. Click the extension's toolbar icon (if a Quip page is open you can export just that document or folder), paste the token and press **Connect**, **Choose folder…**, **Scan** (nothing is written yet) and **Start export**. For a first run tick *Limit to the first N documents* and try 5.
 
-For a first run, tick *Limit to the first N documents* and try 5. Keep the tab open while it runs; you can stop at any time and continue later, and finished documents are not downloaded again.
+You can stop at any time and continue later; finished documents are not downloaded again.
 
-**Keep the exporter tab on screen while it runs.** Browsers throttle and may freeze pages that are not visible. In Dia, an exporter tab whose window was not on screen (covered, minimized or on another desktop) made a request every 30 to 60 seconds and once paused for more than two minutes, while the command line version, which has no tab to throttle, averaged about two requests a second. Keep the exporter tab selected in a window you can see, or use the command line below, which does not depend on a tab.
-
-## Without a browser (command line)
-
-The same exporter code also runs from a terminal, which suits a long export: nothing needs to stay on screen, and the folder is written directly (no folder picker).
-
-```bash
-npm ci
-echo "$QUIP_TOKEN" | npm run cli -- --out ~/quip-export --token-stdin --scan-only   # look first; writes nothing
-echo "$QUIP_TOKEN" | npm run cli -- --out ~/quip-export --token-stdin --from https://<site>.quip.com/<document or folder>
-echo "$QUIP_TOKEN" | npm run cli -- --out ~/quip-export --token-stdin                # everything
-npm run cli -- --help
-```
-
-The token comes from standard input (`--token-stdin`) or the `QUIP_TOKEN` environment variable and is never printed. The command writes the same layout and report as the extension, only ever sends `GET` requests through the same client, can be stopped with Ctrl-C and run again to continue, and takes `--limit`, `--force`, `--no-comments`, `--no-raw`, `--no-xlsx` and `--no-unfiled`. It runs on Node 20 or later and uses jsdom to read Quip's HTML.
+**Keep the exporter tab on screen while it runs.** Browsers throttle and may freeze pages that are not visible. In Dia, an exporter tab whose window was not on screen (covered, minimized or on another desktop) made a request every 30 to 60 seconds and once paused for more than two minutes, while the command line version, which has no tab to throttle, averaged about two requests a second. Keep the exporter tab selected in a window you can see, or use the command line above, which does not depend on a tab.
 
 ## What you get
 
