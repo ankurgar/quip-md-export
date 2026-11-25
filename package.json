@@ -7,6 +7,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:e2e": "node scripts/build.mjs --e2e",
+    "build:cli": "node scripts/build-cli.mjs",
+    "cli": "npm run --silent build:cli >/dev/null && node dist-cli/cli.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

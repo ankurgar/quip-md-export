@@ -115,6 +115,7 @@ let stopRequested = false;
 let working = false;
 let pendingFrom: string | undefined;
 let throttleUntil = 0;
+let exportStartedAt = 0;
 
 // ---- small helpers -------------------------------------------------------
 
@@ -141,11 +142,11 @@ function duration(ms: number): string {
   return m < 90 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
 }
 
-/** Quip allows 50 requests a minute but only 750 an hour; the first 750 can go at full speed. */
-function estimateMs(requests: number): number {
-  const fast = Math.min(requests, 750);
-  const slow = Math.max(0, requests - 750);
-  return (fast / 45) * 60_000 + (slow / 750) * 3_600_000;
+/** Time left, from how long the documents so far took. Only said once there is enough to go on. */
+function timeLeft(startedAt: number, done: number, total: number): string {
+  const elapsed = Date.now() - startedAt;
+  if (done < 5 || elapsed < 10_000 || done >= total) return '';
+  return ` · about ${duration((elapsed / done) * (total - done))} left`;
 }
 
 const TOKEN_REJECTED = 'Quip rejected the access token. Create a new one at quip.com/dev/token and connect again.';
@@ -440,6 +441,7 @@ function buildOptions(): Partial<ExportOptions> {
 function handleEvent(event: ExportEvent): void {
   switch (event.type) {
     case 'phase':
+      if (event.phase === 'export') exportStartedAt = Date.now();
       setStatus(phase === 'scanning' ? ui.scanStatus : ui.runStatus, event.message);
       log(event.message);
       break;
@@ -447,7 +449,7 @@ function handleEvent(event: ExportEvent): void {
       throttleUntil = 0;
       ui.progress.max = Math.max(1, event.total);
       ui.progress.value = event.index;
-      setStatus(ui.runStatus, `${event.index} of ${event.total}: ${event.title}`);
+      setStatus(ui.runStatus, `${event.index} of ${event.total}: ${event.title}${timeLeft(exportStartedAt, event.index, event.total)}`);
       if (event.status === 'exported') log(`Saved ${event.path}`);
       if (event.status === 'failed') log(`Failed: ${event.title} (${event.message ?? 'unknown error'})`, 'error');
       break;
@@ -516,7 +518,7 @@ function showPlan(plan: Plan): void {
   if (unknownFolders > 0 && ui.unfiled.checked) {
     lines.push(`${unknownFolders} folder${unknownFolders === 1 ? '' : 's'} could not be read, so documents you wrote inside ${unknownFolders === 1 ? 'it' : 'them'} may also be exported under "_Unfiled". Untick "Include documents you wrote that are in no folder" and scan again to leave them out.`);
   }
-  lines.push('', `About ${plan.estimatedRequests} Quip API requests, roughly ${duration(estimateMs(plan.estimatedRequests))} at Quip's rate limits (50 a minute, 750 an hour).`);
+  lines.push('', `About ${plan.estimatedRequests} Quip API requests. How long that takes depends on the speed Quip allows for your account; an estimate appears once the export is running.`);
   ui.scanSummary.textContent = lines.join('\n');
   ui.scanSummary.hidden = false;
 }

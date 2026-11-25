@@ -13,12 +13,28 @@ npm ci
 npm run build          # writes the extension to dist/
 ```
 
-1. In Chrome or Edge open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, choose **Load unpacked** and pick the `dist/` folder. (The exporter uses an API token, not your browser session, so it works in any Chromium browser. Loading unpacked extensions in Dia is untested.)
+1. In Chrome or Edge open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, choose **Load unpacked** and pick the `dist/` folder. (The exporter uses an API token, not your browser session, so it works in any Chromium browser. In Dia 1.58 the extension loaded when Dia was started with `--load-extension=<path to dist>`, and its page and read-only guard worked; "Load unpacked" from Dia's own extensions page was not tried.)
 2. While signed in to Quip, open `https://<your-site>.quip.com/dev/token` (or `quip.com/dev/token`) and copy a personal access token. Generating a new token invalidates the previous one, [according to ClonePartner's guide](https://clonepartner.com/blog/how-to-export-data-from-quip-methods-api-limits-migration-prep).
 3. Click the extension's toolbar icon. If a Quip page is open when you click, you can export just that document or folder.
 4. Paste the token, **Connect**, **Choose folder…**, then **Scan** (nothing is written yet) and **Start export**.
 
 For a first run, tick *Limit to the first N documents* and try 5. Keep the tab open while it runs; you can stop at any time and continue later, and finished documents are not downloaded again.
+
+**Keep the exporter tab on screen while it runs.** Browsers pause pages that are not visible. In Dia, an exporter tab that was not on screen (another tab selected, or its window covered, minimized or on another desktop) managed one request every minute or so and stalled for minutes at a time. Select the exporter tab in a window you can see, or use the command line below, which does not depend on a tab.
+
+## Without a browser (command line)
+
+The same exporter code also runs from a terminal, which suits a long export: nothing needs to stay on screen, and the folder is written directly (no folder picker).
+
+```bash
+npm ci
+echo "$QUIP_TOKEN" | npm run cli -- --out ~/quip-export --token-stdin --scan-only   # look first; writes nothing
+echo "$QUIP_TOKEN" | npm run cli -- --out ~/quip-export --token-stdin --from https://<site>.quip.com/<document or folder>
+echo "$QUIP_TOKEN" | npm run cli -- --out ~/quip-export --token-stdin                # everything
+npm run cli -- --help
+```
+
+The token comes from standard input (`--token-stdin`) or the `QUIP_TOKEN` environment variable and is never printed. The command writes the same layout and report as the extension, only ever sends `GET` requests through the same client, can be stopped with Ctrl-C and run again to continue, and takes `--limit`, `--force`, `--no-comments`, `--no-raw`, `--no-xlsx` and `--no-unfiled`. It runs on Node 20 or later and uses jsdom to read Quip's HTML.
 
 ## What you get
 
@@ -82,15 +98,17 @@ Permissions requested: `storage` (settings), `activeTab` (to offer the page you 
 
 ## Rate limits and time
 
-Quip's [Automation API](https://quip.com/dev/automation/documentation/current#section/Rate-Limits) allows 50 requests a minute and 750 an hour per user. The exporter paces itself under the per-minute limit and, when Quip answers 503, waits until the limit resets. A document needs about 2 requests (content and comments), plus one per attachment. The first 750 requests run at full speed, so 300 documents take roughly 15 minutes; after that the hourly limit dominates, so 1,000 documents take about 2 hours. **Scan** shows an estimate for your account. Unchanged documents are skipped on later runs.
+Quip rate-limits the API and reports what is left in the headers of every response. On the account this was tested with, the limits were **200 requests a minute per user and 600 a minute per company**, in windows that reset on the minute (older Quip documentation says 50 a minute and 750 an hour, so your account may differ). The exporter reads those headers on every response and spreads the requests that are left over the time that is left, so it uses what the account allows without exceeding it; a pool with none left blocks until its reset, and a 429 or 503 is waited out as the server asks. Quip also sends a `Retry-After` on every *successful* response (it is the time until the window resets), and the exporter correctly ignores it there; an early version treated it as "stop" and spent about a minute per request.
+
+A document needs about 2 requests (content and comments), plus one per attachment and one for a spreadsheet's `.xlsx`. The tested account (418 documents in 88 folders, 82 spreadsheets, 215 attachments) took about 850 requests and **10 minutes** for the whole export, with no rate-limit pauses. Unchanged documents are skipped on later runs. A request that does not start answering within two minutes is abandoned and retried.
 
 ## Token handling
 
-The token is kept in browser session storage and disappears when the browser closes. Tick *Remember* to also keep it in the extension's local storage (unencrypted, inside your browser profile); unticking it removes the stored copy immediately. If Quip rejects the token during an export, the export stops, nothing further is attempted, and the report says how many documents were left. When you are done, generate a new token at `/dev/token`, which invalidates the old one.
+The token is kept in browser session storage and disappears when the browser closes. Tick *Remember* to also keep it in the extension's local storage (unencrypted, inside your browser profile); unticking it removes the stored copy immediately. If Quip rejects the token during an export, the export stops, nothing further is attempted, and the report says how many documents were left. The `/dev/token` page only has a "Get Personal Access Token" button (no revoke button); according to [ClonePartner's guide](https://clonepartner.com/blog/how-to-export-data-from-quip-methods-api-limits-migration-prep), generating another token invalidates the previous one, which is the way to retire a token you are finished with.
 
 ## Known limits
 
-- **Not yet run against a real Quip account.** It was built and tested against a synthetic account that follows Quip's published API specification, plus public Quip HTML samples. Quip's undocumented HTML details (especially for live apps) may differ; the original HTML is kept in `.quip-raw/` so conversion can be improved and re-run without Quip. Start with a small trial.
+- **Tested against one real account.** All 418 documents of a personal account exported with no failures, and every relative link and image in the result resolves. A comparison of the words in each document's original HTML with its note found no lost text apart from live-app markup that has since been handled. Quip's HTML varies by content, so other accounts may contain things this has not seen (the report lists unknown embedded apps as `unknown-live-app`, and the original HTML is kept in `.quip-raw/` so conversion can be improved). Start with a small trial.
 - Quip's API is [licensed per plan](https://quip.com/dev/automation/documentation/current#section/License-Requirements). If your account cannot create a token, this tool cannot read it.
 - A document can be reached through several Quip addresses. Links are matched by the document id, its current share address and the address Quip reports as its link; a link that uses any other one (for example a previous, replaced share address) stays a Quip URL and is listed in the report.
 - If Quip ever serves an attachment from a host other than `platform.quip.com` (its API documents a direct response), the page's policy blocks the download and the attachment is listed as failed in the report. Widen `connect-src` in `extension/manifest.json` if that happens.
@@ -118,6 +136,7 @@ npm run check     # typecheck, tests, production build, build verification
 
 - `src/core/` has no browser dependencies: `convert/` (HTML → Markdown), `quipClient.ts`, `exporter.ts`, `naming.ts`, `rewrite.ts`.
 - `src/ui/` is the exporter page (File System Access API, settings, progress); `src/background.ts` opens it.
+- `src/node/` is the command line version (`cli.ts`, a Node file sink and a jsdom parser); `npm run build:cli` writes `dist-cli/cli.mjs`.
 - `tests/mock/` is a synthetic Quip API (users, folders, paginated HTML, messages, blobs, 503 throttling, failure injection) used by both the integration and browser tests, which require the browser export to match the Node export file for file.
 
 To add support for another embedded type, extend `src/core/convert/liveApps.ts` and add a case to `tests/unit/liveApps.test.ts`.
