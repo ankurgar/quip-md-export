@@ -66,8 +66,13 @@ export interface ClientOptions {
   fetch?: typeof fetch;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
-  /** Minimum gap between requests. The default stays under Quip's 50 requests/minute limit. */
+  /**
+   * Minimum gap between requests. On top of this the client reads Quip's rate-limit headers from every response and
+   * spreads the requests that are left over the time that is left, so it adapts to whatever limit the account has.
+   */
   minIntervalMs?: number;
+  /** How long to wait for a response to start before giving up on it and trying again. */
+  requestTimeoutMs?: number;
   /** Retries for 5xx and network errors. Rate limiting is retried until it clears. */
   maxRetries?: number;
   /** Messages requested per page. */
@@ -82,6 +87,10 @@ type Query = Record<string, string | number | boolean | undefined>;
 const ENTITY_ID_RE = /^[A-Za-z0-9]{8,32}$/;
 const BLOB_ID_RE = /^[\w-]{8,64}$/;
 const MAX_WAIT_MS = 3_600_000;
+const DEFAULT_MIN_INTERVAL_MS = 250;
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+/** A pause between two requests never exceeds this because of the headers alone; an exhausted pool blocks instead. */
+const MAX_ADAPTIVE_GAP_MS = 60_000;
 const MAX_THROTTLE_WAITS = 30;
 /** [remaining header, reset header] for each rate-limit pool Quip documents. */
 const RETRY_AFTER_HEADERS = ['retry-after', 'x-company-retry-after', 'x-documentbulkexport-retry-after'];
@@ -159,8 +168,11 @@ export class QuipClient implements QuipApi {
   private readonly pageSize: number;
   private readonly signal: AbortSignal | undefined;
   private readonly onEvent: ((event: ClientEvent) => void) | undefined;
+  private readonly requestTimeout: number;
   private nextSlot = 0;
   private blockedUntil = 0;
+  /** When the request in flight started, which is what the gap after it is counted from. */
+  private lastStart = 0;
 
   constructor(opts: ClientOptions) {
     if (!opts.token || !opts.token.trim()) throw new Error('A Quip access token is required.');
@@ -173,7 +185,8 @@ export class QuipClient implements QuipApi {
     this.fetchFn = opts.fetch ?? ((...args) => fetch(...args));
     this.sleepFn = opts.sleep ?? defaultSleep;
     this.now = opts.now ?? Date.now;
-    this.minInterval = opts.minIntervalMs ?? 1300;
+    this.minInterval = opts.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+    this.requestTimeout = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.maxRetries = opts.maxRetries ?? 5;
     this.pageSize = opts.messagePageSize ?? 100;
     this.signal = opts.signal;
@@ -197,7 +210,8 @@ export class QuipClient implements QuipApi {
   private async pace(): Promise<void> {
     const wait = Math.max(this.nextSlot, this.blockedUntil) - this.now();
     if (wait > 0) await this.waitFor(wait, 'rate-limit', '');
-    this.nextSlot = Math.max(this.now(), this.nextSlot) + this.minInterval;
+    this.lastStart = this.now();
+    this.nextSlot = Math.max(this.lastStart, this.nextSlot) + this.minInterval;
   }
 
   /**
@@ -224,6 +238,11 @@ export class QuipClient implements QuipApi {
       this.signal?.throwIfAborted();
       await this.pace();
       let res: Response;
+      // A connection that stalls must not hang an hours-long export: give up on a response that does not start, then retry.
+      const attemptAbort = new AbortController();
+      const relayAbort = (): void => attemptAbort.abort(this.signal?.reason);
+      this.signal?.addEventListener('abort', relayAbort, { once: true });
+      const timer = setTimeout(() => attemptAbort.abort(new DOMException('The request took too long to start answering', 'TimeoutError')), this.requestTimeout);
       try {
         res = await this.fetchFn(url, {
           method: 'GET',
@@ -232,13 +251,16 @@ export class QuipClient implements QuipApi {
           cache: 'no-store',
           redirect,
           referrerPolicy: 'no-referrer',
-          ...(this.signal ? { signal: this.signal } : {}),
+          signal: attemptAbort.signal,
         });
       } catch (err) {
         if (this.signal?.aborted) throw err;
         if (attempt >= this.maxRetries) throw new Error(`Network error for ${path}: ${this.redact(String(err))}`);
         await this.waitFor(Math.min(30_000, 1000 * 2 ** attempt), 'network', path);
         continue;
+      } finally {
+        clearTimeout(timer);
+        this.signal?.removeEventListener('abort', relayAbort);
       }
 
       this.onEvent?.({ type: 'request', path, status: res.status });
@@ -272,14 +294,29 @@ export class QuipClient implements QuipApi {
     if (u.protocol !== 'https:' && !loopback) throw new QuipHttpError(0, path, 'refused a redirect to a non-HTTPS address');
   }
 
-  /** After a response that spends a quota, hold the next request back instead of provoking a 503. */
+  /**
+   * Learns from every response how fast requests may go. For each pool Quip reports the requests left in the current
+   * window and when it resets: a pool with none left blocks until the reset, otherwise what is left is spread over the
+   * time that is left, which uses the limit fully and never exceeds it. A Retry-After on a successful response only says
+   * when the window resets (Quip sends one on every response); it is not a request to wait.
+   */
   private observe(headers: Headers): void {
-    const delay = this.throttleDelay(headers);
-    if (delay !== undefined) this.blockedUntil = Math.max(this.blockedUntil, this.now() + delay);
+    const now = this.now();
+    let gap: number | undefined;
+    for (const [remainingHeader, resetHeader] of RATE_POOLS) {
+      const remaining = headerNumber(headers, [remainingHeader]);
+      if (remaining === undefined) continue;
+      const resetAt = headerNumber(headers, [resetHeader]);
+      const untilReset = resetAt !== undefined ? Math.max(0, resetAt * 1000 - now) : undefined;
+      if (remaining <= 0) this.blockedUntil = Math.max(this.blockedUntil, now + Math.min(MAX_WAIT_MS, (untilReset ?? 5000) + 1000));
+      else if (untilReset !== undefined) gap = Math.max(gap ?? 0, untilReset / remaining);
+    }
+    // The next request may start this long after the one these headers belong to started.
+    if (gap !== undefined) this.nextSlot = Math.max(this.nextSlot, this.lastStart + Math.min(MAX_ADAPTIVE_GAP_MS, gap));
   }
 
   /**
-   * Milliseconds to wait, or undefined when the response gives no sign that a quota is the problem.
+   * For a 429 or 503: milliseconds to wait, or undefined when the response gives no sign that a quota is the problem.
    * The user, company and bulk-export pools are checked separately: only a pool whose remaining
    * count is zero (or an explicit Retry-After) means "wait"; a 503 that arrives with quota to spare
    * is a service failure and goes through the ordinary bounded retries.

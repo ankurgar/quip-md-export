@@ -164,6 +164,56 @@ describe('rate limiting and errors', () => {
     expect(clock.slept[0]).toBeLessThanOrEqual(22_000);
   });
 
+  it('does not treat the Retry-After Quip sends on every successful response as a request to wait', async () => {
+    // Real headers seen from Quip: every 200 carries the seconds until the current window resets.
+    const { c, clock, calls } = client(() => json({ id: 'u1', name: 'Me' }, 200, { 'retry-after': '55', 'x-company-retry-after': '55', 'x-ratelimit-limit': '200', 'x-ratelimit-remaining': '190', 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 55), 'x-company-ratelimit-limit': '600', 'x-company-ratelimit-remaining': '590', 'x-company-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 55) }));
+    for (let i = 0; i < 5; i += 1) await c.currentUser();
+    expect(calls).toHaveLength(5);
+    expect(Math.max(0, ...clock.slept)).toBeLessThan(1000);
+    expect(clock.slept.reduce((a, b) => a + b, 0)).toBeLessThan(2000);
+  });
+
+  it('spreads the requests that are left over the time that is left, and learns the pace from the headers alone', async () => {
+    let remaining = 10;
+    const { c, clock } = client(() => json({ id: 'u1', name: 'Me' }, 200, { 'x-ratelimit-remaining': String(remaining--), 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 30) }), { minIntervalMs: 0 });
+    await c.currentUser(); // 10 left in 30 s: about 3 s apart
+    await c.currentUser();
+    expect(clock.slept).toHaveLength(1);
+    expect(clock.slept[0]).toBeGreaterThanOrEqual(2900);
+    expect(clock.slept[0]).toBeLessThanOrEqual(3300);
+  });
+
+  it('stops for the rest of the window when a response says nothing is left', async () => {
+    const { c, clock } = client(() => json({ id: 'u1', name: 'Me' }, 200, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 20) }));
+    await c.currentUser();
+    await c.currentUser();
+    expect(clock.slept.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(20_000);
+    expect(clock.slept.reduce((a, b) => a + b, 0)).toBeLessThan(23_000);
+  });
+
+  it('gives up on a request that never starts answering, and tries it again', async () => {
+    let n = 0;
+    const { c, calls } = client(
+      (_url, init) => {
+        n += 1;
+        if (n === 1) return new Promise<Response>((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason)));
+        return json({ id: 'u1', name: 'Me' });
+      },
+      { requestTimeoutMs: 40 },
+    );
+    await expect(c.currentUser()).resolves.toMatchObject({ id: 'u1' });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('still stops at once when the caller aborts while a request is in flight', async () => {
+    const controller = new AbortController();
+    const { c, calls } = client((_url, init) => new Promise<Response>((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason))), { signal: controller.signal, requestTimeoutMs: 60_000 });
+    const pending = c.currentUser();
+    setTimeout(() => controller.abort(), 20);
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toHaveLength(1);
+  });
+
   it('after a response that spends the quota, delays the next request instead of provoking a 503', async () => {
     const { c, clock, calls } = client(() => json({ id: 'u1', name: 'Me' }, 200, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 5) }));
     await c.currentUser();
@@ -357,7 +407,11 @@ describe('hardening from code review', () => {
     const { c, calls, clock } = client(() => json({}, 503, { 'x-ratelimit-remaining': '12', 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 30) }), { maxRetries: 2 });
     await expect(c.currentUser()).rejects.toBeInstanceOf(QuipHttpError);
     expect(calls).toHaveLength(3);
-    expect(clock.slept).toEqual([1000, 2000]);
+    // The ordinary service back-off (1 s, then 2 s) plus the pacing that spreads 12 requests over the window, but never
+    // a wait for the whole 30 s the headers say remain.
+    expect(clock.slept).toEqual(expect.arrayContaining([1000, 2000]));
+    expect(Math.max(...clock.slept)).toBeLessThan(5000);
+    expect(clock.slept.reduce((a, b) => a + b, 0)).toBeLessThan(8000);
   });
 
   it('checks every rate-limit pool: an exhausted company quota is honoured even if the user quota is fine', async () => {
