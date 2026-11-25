@@ -83,7 +83,7 @@ describe('the extension in a real Chromium', () => {
   it('loads with a service worker and the production-safe manifest', async () => {
     expect(extensionId).toMatch(/^[a-p]{32}$/);
     const page = await openExporter();
-    expect(await page.title()).toBe('Quip to Markdown exporter');
+    expect(await page.title()).toBe('Quipendo');
     await expect(page.textContent('#guard-status')).resolves.toContain('read-only guard: on');
     await expect(page.textContent('#target-name')).resolves.toBe('e2e-target');
     await page.close();

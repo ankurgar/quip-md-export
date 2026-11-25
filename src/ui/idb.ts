@@ -1,4 +1,4 @@
-const DB_NAME = 'quip-md-export';
+const DB_NAME = 'quipendo';
 const STORE = 'kv';
 
 function open(): Promise<IDBDatabase> {

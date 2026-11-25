@@ -1,6 +1,8 @@
-# Quip → Markdown exporter
+# Quipendo
 
-A Chrome (Manifest V3) extension, and a command line version of the same code, that copy your Quip folders and documents into a folder on your computer as Markdown, keeping Quip's folder structure. It also converts embedded content that other exporters drop: **calendars, Kanban boards, project trackers, process bars, embedded and standalone spreadsheets**, comments, images and file attachments.
+*A charm that turns your Quip folders into Markdown, before Quip goes away.*
+
+**Quipendo** is a Chrome (Manifest V3) extension, and a command line version of the same code, that copy your Quip folders and documents into a folder on your computer as Markdown, keeping Quip's folder structure. It also converts embedded content that other exporters drop: **calendars, Kanban boards, project trackers, process bars, embedded and standalone spreadsheets**, comments, images and file attachments.
 
 **It is read-only.** It cannot create, edit or delete anything in Quip, and it never deletes files from your target folder or overwrites a file it did not create. See [Read-only guarantees](#read-only-guarantees).
 
@@ -13,8 +15,7 @@ The extension and the command line are the same exporter, and both only ever sen
 **1. Install**
 
 ```bash
-cd quip-md-export
-npm ci
+npm ci    # run in the project folder
 ```
 
 **2. Get a token.** While signed in to Quip, open `https://<your-site>.quip.com/dev/token` (or `quip.com/dev/token`), click **Get Personal Access Token** and copy it. Give it to your shell without echoing it or leaving it in your history:

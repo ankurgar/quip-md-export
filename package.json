@@ -1,8 +1,8 @@
 {
-  "name": "quip-md-export",
+  "name": "quipendo",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only Chrome (MV3) extension that replicates your Quip folder tree as Markdown files in a folder you choose.",
+  "description": "Quipendo: a read-only Chrome (MV3) extension and command line tool that copy your Quip folders and documents to Markdown files.",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

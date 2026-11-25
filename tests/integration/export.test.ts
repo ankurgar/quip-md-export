@@ -382,6 +382,15 @@ describe('never overwriting, checked again on every run', () => {
     expect(await read('_Quip export report (2).md')).toContain('9 unchanged since the last run');
   });
 
+  it('still treats a report written under the tool\'s earlier name as its own', async () => {
+    const earlier = '# Quip export report\n\n- Status: Finished\n- Finished: 2026-11-25T09:03:15.417Z\n- Tool: quip-md-export 0.1.0\n';
+    await writeFile(join(ctx.dir, '_Quip export report.md'), earlier);
+    const run = await runAll();
+    expect(run.reportPath).toBe('_Quip export report.md');
+    expect(await read('_Quip export report.md')).toContain('- Tool: Quipendo 0.1.0');
+    expect(await visible()).not.toContain('_Quip export report (2).md');
+  });
+
   it('leaves a file that replaced one of its notes alone, and writes the note to a new name', async () => {
     await runAll();
     await writeFile(join(ctx.dir, 'Private/Notes.md'), 'MY OWN NOTES REPLACED THE EXPORTED ONE');

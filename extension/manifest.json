@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Quip to Markdown Exporter",
+  "name": "Quipendo",
   "version": "0.1.0",
   "description": "Read-only: copies your Quip folders and documents into a local folder as Markdown, including calendars, Kanban boards, project trackers and spreadsheets.",
   "minimum_chrome_version": "110",
   "action": {
-    "default_title": "Export Quip to Markdown"
+    "default_title": "Quipendo: export Quip to Markdown"
   },
   "background": {
     "service_worker": "background.js",

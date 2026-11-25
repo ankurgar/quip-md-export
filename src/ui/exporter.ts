@@ -244,7 +244,7 @@ async function useTarget(handle: FileSystemDirectoryHandle): Promise<void> {
 
 async function pickTarget(): Promise<void> {
   try {
-    const handle = await window.showDirectoryPicker({ id: 'quip-md-export', mode: 'readwrite', startIn: 'documents' });
+    const handle = await window.showDirectoryPicker({ id: 'quipendo', mode: 'readwrite', startIn: 'documents' });
     await idbSet('target', handle);
     await useTarget(handle);
   } catch (err) {
@@ -592,7 +592,7 @@ function summarize(s: ExportSummary): string {
 }
 
 /** Held by the one exporter tab that is writing, so two tabs can never pick the same file name for different documents. */
-const RUN_LOCK = 'quip-md-export-run';
+const RUN_LOCK = 'quipendo-run';
 
 /** Runs one export and says which phase to end in. The caller applies it last, once nothing is left to wait for. */
 async function runExport(): Promise<Phase> {

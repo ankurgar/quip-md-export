@@ -8,7 +8,7 @@ import { createSession, type SessionConfig } from '../core/session';
 import { parseHtmlWithJsdom } from './jsdomParser';
 import { NodeFsSink } from './nodeSink';
 
-export const USAGE = `Quip to Markdown exporter (command line)
+export const USAGE = `Quipendo: Quip to Markdown exporter (command line)
 
 Copies your Quip folders and documents into a folder as Markdown, using exactly the same code as the browser
 extension. It only ever reads from Quip. Run it again to continue or to pick up changes; nothing is deleted

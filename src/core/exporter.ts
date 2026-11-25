@@ -9,10 +9,13 @@ import { attachmentExtension, rewriteSentinels, stripExtension } from './rewrite
 import type { Sink } from './sink';
 import type { BlobRef, FolderMeta, ThreadMeta, Warning } from './types';
 
-export const TOOL_NAME = 'quip-md-export';
+export const TOOL_NAME = 'Quipendo';
+/** Names this tool wrote into its report before it was renamed; still recognised so an earlier export keeps updating its own report. */
+const PREVIOUS_TOOL_NAMES = ['quip-md-export'];
 export const TOOL_VERSION = '0.1.0';
 /** Bump whenever the converter or note format changes, so existing notes are re-rendered on the next run. */
 export const FORMAT_VERSION = 5;
+// The state folder keeps its pre-rename name: renaming it would make every earlier export look like it has no resume state.
 export const STATE_PATH = '.quip-md-export/state.json';
 export const REPORT_JSON_PATH = '.quip-md-export/report.json';
 export const REPORT_MD_PATH = '_Quip export report.md';
@@ -237,7 +240,10 @@ const hasPdfSignature = (b: Uint8Array): boolean => {
   return false;
 };
 /** First line and tool line of the report, which is how a report written by this tool is recognised. */
-const isOwnReport = (text: string): boolean => text.startsWith('# Quip export report\n') && text.slice(0, 600).includes(`- Tool: ${TOOL_NAME} `);
+const isOwnReport = (text: string): boolean => {
+  const head = text.slice(0, 600);
+  return text.startsWith('# Quip export report\n') && [TOOL_NAME, ...PREVIOUS_TOOL_NAMES].some((name) => head.includes(`- Tool: ${name} `));
+};
 
 export class Exporter {
   private readonly opts: ExportOptions;
