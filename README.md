@@ -208,3 +208,7 @@ npm run check     # typecheck, tests, production build, build verification
 - `tests/mock/` is a synthetic Quip API (users, folders, paginated HTML, messages, blobs, 503 throttling, failure injection) used by both the integration and browser tests, which require the browser export to match the Node export file for file.
 
 To add support for another embedded type, extend `src/core/convert/liveApps.ts` and add a case to `tests/unit/liveApps.test.ts`.
+
+## License
+
+[MIT](LICENSE)
