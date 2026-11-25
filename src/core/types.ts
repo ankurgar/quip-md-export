@@ -52,6 +52,8 @@ export interface ConvertResult {
   markdown: string;
   blobs: BlobRef[];
   docLinks: string[];
+  /** The original href for each doc link id, kept for links that point outside the export. */
+  docUrls: Record<string, string>;
   embeds: Record<string, number>;
   warnings: Warning[];
   unknownUserIds: string[];
@@ -64,4 +66,6 @@ export interface ConvertOptions {
   maxDumpChars?: number;
   /** Standalone spreadsheet threads render each sheet under an `##` heading. */
   spreadsheetThread?: boolean;
+  /** IANA time zone used to read date-only values (default UTC). */
+  timeZone?: string;
 }

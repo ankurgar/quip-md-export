@@ -48,6 +48,10 @@ describe('inline formatting and escaping', () => {
     expect(md('<p><code>a`b</code></p>')).toBe('``a`b``');
   });
 
+  it('keeps zero-width joiners and non-joiners that carry meaning, and drops only Quip\'s padding', () => {
+    expect(md('<p>می\u200cخواهم \u{1F469}\u200d\u{1F4BB} a\u200bb</p>')).toBe('می\u200cخواهم \u{1F469}\u200d\u{1F4BB} ab');
+  });
+
   it('turns headings into ATX headings on a single line', () => {
     expect(md('<h2>Big<br>Title</h2><h3>Small</h3>')).toBe('## Big Title\n\n### Small');
   });
@@ -77,6 +81,19 @@ describe('links, images and attachments', () => {
     const r = convert(`<p><control data-remapped="true"><a href="https://quip.com/-/blob/NATTACHthr1/SyntheticBlobId0000001?name=Shortcut.lnk">Shortcut.lnk</a></control></p>`);
     expect(r.blobs).toEqual([{ threadId: 'NATTACHthr1', blobId: 'SyntheticBlobId0000001', kind: 'file', hint: 'Shortcut.lnk' }]);
     expect(r.markdown.trim()).toBe('[Shortcut.lnk](quip-blob:NATTACHthr1/SyntheticBlobId0000001)');
+  });
+
+  it('never lets an empty link with an unusual URL break out of an autolink', () => {
+    const out = md('<p><a href="https://a.example/x&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"></a></p>');
+    expect(out).not.toMatch(/(^|[^\\])<img/); // every '<' that could start HTML is backslash-escaped or percent-encoded
+    expect(out.startsWith('[')).toBe(true);
+    expect(md('<p><a href="https://a.example/ok"></a></p>')).toBe('<https://a.example/ok>');
+  });
+
+  it('flags a Quip control that renders to nothing instead of silently dropping it', () => {
+    const r = convert('<p>before <control data-remapped="true"></control> after</p>');
+    expect(r.markdown).toContain('<!-- empty Quip control -->');
+    expect(r.warnings).toEqual([{ code: 'empty-control', detail: 'true' }]);
   });
 
   it('writes a link whose text is its own URL as an autolink', () => {
@@ -156,9 +173,14 @@ describe('tables and spreadsheets', () => {
     expect(md(html)).toBe('| Name | Rent |\n| --- | --- |\n| Ann | 100 |');
   });
 
-  it('drops the letter row but keeps the first column when it is not a row-number column', () => {
-    const html = `<table><thead><tr><th></th><th>A</th></tr></thead><tbody><tr><td>x</td><td>1</td></tr></tbody></table>`;
+  it('drops the letter row of a confirmed spreadsheet but keeps a first column that is not row numbers', () => {
+    const html = `<div data-section-style="13"><table><thead><tr><th></th><th>A</th></tr></thead><tbody><tr><td>x</td><td>1</td></tr></tbody></table></div>`;
     expect(md(html)).toBe('| x | 1 |\n| --- | --- |');
+  });
+
+  it('never strips data from an ordinary table, even one that looks like spreadsheet chrome', () => {
+    const html = `<table><thead><tr><th></th><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>true</td><td>false</td></tr><tr><td>2</td><td>false</td><td>true</td></tr></tbody></table>`;
+    expect(md(html)).toBe('|   | A | B |\n| --- | --- | --- |\n| 1 | true | false |\n| 2 | false | true |');
   });
 
   it("removes the <br> Quip puts at the end of every cell and drops a letters-only header row (real export shape)", () => {
@@ -201,6 +223,11 @@ describe('tables and spreadsheets', () => {
 });
 
 describe('code, quotes and rules', () => {
+  it('drops a code language that is not a plain identifier, so it cannot inject markup', () => {
+    expect(md('<pre data-lang="js\n</pre><script>alert(1)</script>">x</pre>')).toBe('```\nx\n```');
+    expect(md('<pre class="lang-c++">x</pre>')).toBe('```c++\nx\n```');
+  });
+
   it('emits fenced code with language and longer fences when needed', () => {
     expect(md('<pre class="prettyprint lang-python">print(1)\nprint(2)</pre>')).toBe('```python\nprint(1)\nprint(2)\n```');
     expect(md('<pre>a ``` b</pre>')).toBe('````\na ``` b\n````');

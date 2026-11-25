@@ -1,6 +1,6 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ANN, ME, SITE, TOKEN, buildFixture, F_ARCH, F_DESK, F_PRIV, F_SHARED, F_STAR, F_TRASH, type Fixture, type FixtureThread } from './fixture';
+import { ANN, BOB, ME, SITE, TOKEN, XLSX_BYTES, buildFixture, F_ARCH, F_DESK, F_PRIV, F_SHARED, F_STAR, F_TRASH, type Fixture, type FixtureThread } from './fixture';
 
 export interface RecordedRequest {
   method: string;
@@ -30,6 +30,8 @@ export interface MockQuip {
 
 const userInfo = (u: { id: string; name: string }): Record<string, unknown> => ({ id: u.id, name: u.name, emails: [`${u.name.split(' ')[0]?.toLowerCase()}@example.com`] });
 
+const hasSheet = (t: FixtureThread): boolean => t.type === 'SPREADSHEET' || t.pages.join('').includes("data-section-style='13'");
+
 function threadJson(t: FixtureThread): Record<string, unknown> {
   return {
     id: t.id,
@@ -40,7 +42,7 @@ function threadJson(t: FixtureThread): Record<string, unknown> {
     updated_usec: t.updated,
     link: `${SITE}/${t.secret ?? t.id}`,
     ...(t.secret ? { secret_path: t.secret } : {}),
-    ...(t.type === 'SPREADSHEET' ? { spreadsheet_summary: { num_tables: 2 } } : {}),
+    ...(hasSheet(t) ? { spreadsheet_summary: { num_tables: t.type === 'SPREADSHEET' ? 2 : 1 } } : {}),
     ...(t.movedTo ? { mark_as_moved_to_external: { status: 'moved', url: t.movedTo } } : {}),
   };
 }
@@ -64,7 +66,7 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
     if (!f) return undefined;
     return { folder: { id: f.id, title: f.title, creator_id: ME.id, folder_class: 'standard' }, member_ids: [ME.id], children: f.children };
   };
-  const userJson = (id: string): Record<string, unknown> | undefined => (id === ME.id ? userInfo(ME) : id === ANN.id ? userInfo(ANN) : undefined);
+  const userJson = (id: string): Record<string, unknown> | undefined => [ME, ANN, BOB].find((u) => u.id === id) && userInfo([ME, ANN, BOB].find((u) => u.id === id) as { id: string; name: string });
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://mock');
@@ -159,6 +161,11 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
       if (!blob) return error(res, 404, 'not found');
       if ('forbidden' in blob) return error(res, 403, 'forbidden');
       return send(res, 200, blob.bytes, { 'content-type': blob.type });
+    }
+    if ((m = /^\/1\/threads\/([\w-]+)\/export\/xlsx$/.exec(path))) {
+      const t = fx.threads[m[1] as string];
+      if (!t) return error(res, 404, 'not found');
+      return hasSheet(t) ? send(res, 200, XLSX_BYTES, { 'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }) : error(res, 400, 'thread has no spreadsheet');
     }
     if ((m = /^\/1\/threads\/([\w-]+)\/export\/pdf$/.exec(path))) {
       return fx.threads[m[1] as string]?.type === 'SLIDES' ? send(res, 200, new TextEncoder().encode('%PDF-1.4\n%slides\n'), { 'content-type': 'application/pdf' }) : error(res, 400, 'not a slide deck');

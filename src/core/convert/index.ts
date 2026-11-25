@@ -29,6 +29,7 @@ export function htmlToMarkdown(html: string, options: ConvertOptions, parse: Htm
     markdown: markdown ? `${markdown}\n` : '',
     blobs: cx.blobs,
     docLinks: [...cx.docLinks],
+    docUrls: cx.docUrls,
     embeds: cx.embeds,
     warnings: cx.warnings,
     unknownUserIds: [...cx.unknownUsers],

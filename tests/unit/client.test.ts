@@ -238,7 +238,33 @@ describe('pagination and bulk helpers', () => {
     }, { messagePageSize: 2 });
     const msgs = await c.getMessages('ABCDEFGHIJK');
     expect(msgs.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
-    expect(calls).toHaveLength(3);
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('does not lose messages that share a timestamp across a page boundary', async () => {
+    const all = [
+      { id: 'a', created_usec: 1000 },
+      { id: 'b', created_usec: 2000 },
+      { id: 'c', created_usec: 2000 },
+      { id: 'd', created_usec: 2000 },
+      { id: 'e', created_usec: 3000 },
+    ].map((m) => ({ ...m, text: m.id, author_id: 'u1' }));
+    const { c } = client((url) => {
+      const count = Number(url.searchParams.get('count'));
+      const max = url.searchParams.get('max_created_usec');
+      const list = all.filter((m) => (max ? m.created_usec <= Number(max) : true)).sort((a, b) => b.created_usec - a.created_usec || b.id.localeCompare(a.id)).slice(0, count);
+      return json(list);
+    }, { messagePageSize: 3 });
+    const ids = (await c.getMessages('ABCDEFGHIJK')).map((m) => m.id).sort();
+    expect(ids).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('still terminates when more messages share one timestamp than fit in a page', async () => {
+    const all = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, created_usec: 5000, text: id, author_id: 'u1' }));
+    const { c, calls } = client((url) => json(all.filter((m) => (url.searchParams.get('max_created_usec') ? m.created_usec <= Number(url.searchParams.get('max_created_usec')) : true)).slice(0, Number(url.searchParams.get('count')))), { messagePageSize: 2 });
+    const msgs = await c.getMessages('ABCDEFGHIJK');
+    expect(msgs.length).toBeGreaterThanOrEqual(2);
+    expect(calls.length).toBeLessThan(10);
   });
 
   it('isolates one unreadable id by splitting a rejected bulk request', async () => {
@@ -273,5 +299,83 @@ describe('pagination and bulk helpers', () => {
     sizes.length = 0;
     await c.getFolders(ids.slice(0, 120));
     expect(sizes).toEqual([50, 50, 20]);
+  });
+});
+
+describe('hardening from code review', () => {
+  it('treats an error object inside a bulk response as unreadable, not as an empty folder', async () => {
+    const { c } = client(() => json({ GOODGOOD001: { folder: { id: 'GOODGOOD001', title: 'ok' }, children: [] }, BADBADBAD01: { error: 'forbidden', error_code: 403 } }));
+    const res = await c.getFolders(['GOODGOOD001', 'BADBADBAD01']);
+    expect(res.get('GOODGOOD001')).toMatchObject({ ok: true });
+    expect(res.get('BADBADBAD01')).toMatchObject({ ok: false, status: 403 });
+  });
+
+  it('fails a document whose HTML page has no html field instead of returning a truncated body', async () => {
+    let n = 0;
+    const { c } = client(() => (++n === 1 ? json({ html: '<p>one</p>', response_metadata: { next_cursor: 'c2' } }) : json({ error: 'oops' })));
+    await expect(c.getThreadHtml('ABCDEFGHIJK')).rejects.toThrow(/no html field/);
+  });
+
+  it('does not wait forever on a 503 that arrives with quota to spare: it is a service failure', async () => {
+    const { c, calls, clock } = client(() => json({}, 503, { 'x-ratelimit-remaining': '12', 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 30) }), { maxRetries: 2 });
+    await expect(c.currentUser()).rejects.toBeInstanceOf(QuipHttpError);
+    expect(calls).toHaveLength(3);
+    expect(clock.slept).toEqual([1000, 2000]);
+  });
+
+  it('checks every rate-limit pool: an exhausted company quota is honoured even if the user quota is fine', async () => {
+    let n = 0;
+    const { c, clock } = client(() =>
+      ++n === 1
+        ? json({}, 503, {
+            'x-ratelimit-remaining': '40',
+            'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 5),
+            'x-company-ratelimit-remaining': '0',
+            'x-company-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 25),
+          })
+        : json({ id: 'u1', name: 'Me' }),
+    );
+    await c.currentUser();
+    expect(clock.slept.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(25_000);
+  });
+
+  it('gives up if the rate limit never clears, instead of waiting indefinitely', async () => {
+    const { c, calls } = client((_u, _i) => json({}, 503, { 'retry-after': '1' }));
+    await expect(c.currentUser()).rejects.toThrow(/did not clear/);
+    expect(calls.length).toBeLessThanOrEqual(32);
+  });
+
+  it('retries a bare 429 with backoff like a service error', async () => {
+    let n = 0;
+    const { c, clock } = client(() => (++n < 3 ? json({}, 429) : json({ id: 'u1', name: 'Me' })));
+    await expect(c.currentUser()).resolves.toMatchObject({ id: 'u1' });
+    expect(clock.slept).toEqual([1000, 2000]);
+  });
+
+  it('refuses redirects on JSON endpoints but lets downloads follow them over HTTPS only', async () => {
+    const seen: Array<{ path: string; redirect: RequestRedirect | undefined }> = [];
+    const { c } = client((url, init) => {
+      seen.push({ path: url.pathname, redirect: init.redirect });
+      return url.pathname.startsWith('/1/blob/') ? new Response(new Uint8Array([1, 2, 3]), { status: 200 }) : json({ id: 'u1', name: 'Me' });
+    });
+    await c.currentUser();
+    await c.getBlob('ABCDEFGHIJK', 'BLOBID12345');
+    expect(seen).toEqual([
+      { path: '/1/users/current', redirect: 'error' },
+      { path: '/1/blob/ABCDEFGHIJK/BLOBID12345', redirect: 'follow' },
+    ]);
+
+    const redirected = client(() => Object.defineProperty(new Response('x', { status: 200 }), 'redirected', { value: true }) as Response);
+    Object.defineProperty(redirected.c, 'dummy', { value: 1 });
+    const insecure = client(() => Object.defineProperties(new Response('x', { status: 200 }), { redirected: { value: true }, url: { value: 'http://evil.example/x' } }));
+    await expect(insecure.c.getBlob('ABCDEFGHIJK', 'BLOBID12345')).rejects.toThrow(/non-HTTPS/);
+  });
+
+  it('can fetch the XLSX export of a spreadsheet (a read-only GET)', async () => {
+    const { c, calls } = client(() => new Response(new Uint8Array([80, 75]), { status: 200, headers: { 'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } }));
+    const file = await c.getXlsx('ABCDEFGHIJK');
+    expect(file.bytes).toEqual(new Uint8Array([80, 75]));
+    expect(calls[0]?.url.pathname).toBe('/1/threads/ABCDEFGHIJK/export/xlsx');
+    expect(calls[0]?.init.method).toBe('GET');
   });
 });

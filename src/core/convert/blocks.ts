@@ -61,13 +61,15 @@ function preText(el: Element): string {
   return stripZeroWidth(s).replace(/\u00a0/g, ' ');
 }
 
+const SAFE_LANGUAGE = /^[A-Za-z0-9_+#.-]{1,32}$/;
+
+/** A fence info string must stay on one line and cannot carry markup, so anything unusual is dropped. */
 function codeLanguage(el: Element): string {
   const probe = [el, el.querySelector('code')].filter((x): x is Element => x !== null);
   for (const p of probe) {
-    const m = /(?:^|\s)(?:lang|language)-([\w+#.-]+)/.exec(p.className);
-    if (m?.[1]) return m[1];
-    const data = p.getAttribute('data-lang') ?? p.getAttribute('data-language');
-    if (data) return data;
+    const fromClass = /(?:^|\s)(?:lang|language)-([\w+#.-]+)/.exec(p.className)?.[1];
+    const candidate = fromClass ?? p.getAttribute('data-lang') ?? p.getAttribute('data-language') ?? '';
+    if (SAFE_LANGUAGE.test(candidate)) return candidate;
   }
   return '';
 }

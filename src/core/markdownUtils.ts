@@ -1,6 +1,7 @@
 /** Pure string helpers for emitting safe, Obsidian-friendly Markdown. */
 
-const ZERO_WIDTH = /[\u200b\u200c\u200d\u2060\ufeff]/g;
+/** Quip pads empty paragraphs with U+200B. ZWNJ/ZWJ are NOT removed: they are meaningful in Persian, Indic scripts and emoji sequences. */
+const ZERO_WIDTH = /[\u200b\u2060\ufeff]/g;
 
 export function stripZeroWidth(s: string): string {
   return s.replace(ZERO_WIDTH, '');

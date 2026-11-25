@@ -87,13 +87,27 @@ function cellText(s: unknown): string {
   return escapeInline(text.replace(/\u200b/g, '').trim()).replace(/\s*\n\s*/g, '<br>').replace(/\|/g, '\\|');
 }
 
+function localParts(ms: number, timeZone: string): { year: string; month: string; day: string; time: string } | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(new Date(ms));
+    const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
+    return { year: get('year'), month: get('month'), day: get('day'), time: `${get('hour')}:${get('minute')}:${get('second')}` };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Quip stores date-only values as local midnight in the author's time zone. Rounding to the
- * nearest UTC midnight recovers the intended calendar day for any offset within +/-12h.
+ * Quip stores a date-only value as local midnight in the author's time zone. If the instant is
+ * midnight in the reader's zone (a personal account is usually written and read in one zone), that
+ * is the date. Otherwise the nearest UTC midnight recovers the day for authors between UTC-12 and
+ * UTC+11:59; authors further east, read from a different zone, can still be one day off.
  */
-export function epochToDate(value: unknown): string {
+export function epochToDate(value: unknown, timeZone = 'UTC'): string {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return cellText(value);
+  const local = localParts(n, timeZone);
+  if (local && local.time === '00:00:00') return `${local.year}-${local.month}-${local.day}`;
   const day = 86_400_000;
   return new Date(Math.round(n / day) * day).toISOString().slice(0, 10);
 }
@@ -181,6 +195,7 @@ function kanbanFromDump(cx: Cx, table: Element): string {
 }
 
 function trackerFromPayload(cx: Cx, payload: Json): string {
+  const zone = cx.opts.timeZone;
   const cols = asArray(payload.columns).filter(isObj);
   const rows = asArray(payload.rows).filter(isObj);
   if (cols.length === 0) return '*Empty tracker.*';
@@ -202,7 +217,7 @@ function trackerFromPayload(cx: Cx, payload: Json): string {
             return cellText(opt?.label ?? value);
           }
           case 'DATE':
-            return epochToDate(value);
+            return epochToDate(value, zone);
           case 'FILE':
             return asArray(value)
               .map((v) => (isObj(v) ? cellText(v.name ?? v.id ?? '') : cellText(v)))
@@ -226,11 +241,10 @@ function processBar(cx: Cx, el: Element): string | undefined {
 }
 
 function genericDump(cx: Cx, el: Element, payload: Json | undefined, max: number): string | undefined {
-  const table = firstOwnTable(el);
-  if (table) {
-    const md = renderTable(cx, table);
-    if (md) return truncate(md, cx, max, 'table');
-  }
+  // Quip's own rendering may hold several tables (for example one per sheet); keep all of them.
+  const tables = Array.from(el.querySelectorAll('table')).filter((t) => !t.parentElement?.closest('table'));
+  const rendered = tables.map((t) => renderTable(cx, t)).filter((md) => md !== '');
+  if (rendered.length > 0) return truncate(rendered.join('\n\n'), cx, max, 'tables');
   const pre = el.querySelector('pre');
   const preText = (pre?.textContent ?? '').trim();
   if (preText) return truncate(fencedBlock(preText), cx, max, 'pre');

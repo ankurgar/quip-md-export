@@ -1,5 +1,5 @@
 const RESERVED_WINDOWS = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-const INVISIBLE = /[\u200b-\u200d\u2060\ufeff]/g;
+const INVISIBLE = /[\u200b\u2060\ufeff]/g;
 // eslint-disable-next-line no-control-regex
 const ILLEGAL = /[\\/:*?"<>|\u0000-\u001f\u007f]/;
 // eslint-disable-next-line no-control-regex
@@ -59,19 +59,26 @@ export function basename(path: string): string {
   return i < 0 ? path : path.slice(i + 1);
 }
 
+/** True when `path` is where `allocate` would put this name today (ignoring a " (2)" collision suffix). */
+function placementMatches(path: string, parentDir: string, base: string, ext: string): boolean {
+  if (dirname(path).toLowerCase() !== parentDir.toLowerCase()) return false;
+  let name = basename(path);
+  if (ext && name.toLowerCase().endsWith(ext.toLowerCase())) name = name.slice(0, name.length - ext.length);
+  else if (ext) return false;
+  return name.toLowerCase() === base.toLowerCase() || new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(\\d+\\)$`, 'i').test(name);
+}
+
 /**
- * Hands out unique paths. Uniqueness is case-insensitive (default macOS/Windows file
- * systems) and allocations are keyed so a re-run reuses the previous path.
+ * Hands out unique paths. Uniqueness is case-insensitive (default macOS/Windows file systems).
+ * A key keeps its path across runs while its folder and title are unchanged; if either changes
+ * the key gets a new path and the old one stays reserved (files are never deleted or reused).
  */
 export class PathAllocator {
   private readonly used = new Set<string>();
   private readonly byKey = new Map<string, string>();
 
   constructor(seed: Record<string, string> = {}) {
-    for (const [key, path] of Object.entries(seed)) {
-      this.byKey.set(key, path);
-      this.used.add(path.toLowerCase());
-    }
+    for (const [key, path] of Object.entries(seed)) this.restore(key, path);
   }
 
   get(key: string): string | undefined {
@@ -84,22 +91,48 @@ export class PathAllocator {
     this.used.add(path.toLowerCase());
   }
 
+  /** Marks a path as taken without binding it to a key (for files the tool itself writes). */
+  reserve(path: string): void {
+    this.used.add(path.toLowerCase());
+  }
+
   snapshot(): Record<string, string> {
     return Object.fromEntries(this.byKey);
   }
 
+  private candidate(parentDir: string, base: string, ext: string, n: number): string {
+    return joinPath(parentDir, n === 1 ? `${base}${ext}` : `${base} (${n})${ext}`);
+  }
+
   allocate(key: string, parentDir: string, desiredName: string, ext = ''): string {
-    const existing = this.byKey.get(key);
-    if (existing) return existing;
     const base = sanitizeName(desiredName);
-    let candidate = joinPath(parentDir, `${base}${ext}`);
-    let n = 2;
-    while (this.used.has(candidate.toLowerCase())) {
-      candidate = joinPath(parentDir, `${base} (${n})${ext}`);
-      n += 1;
+    const existing = this.byKey.get(key);
+    if (existing && placementMatches(existing, parentDir, base, ext)) return existing;
+    for (let n = 1; ; n += 1) {
+      const candidate = this.candidate(parentDir, base, ext, n);
+      if (this.used.has(candidate.toLowerCase())) continue;
+      this.used.add(candidate.toLowerCase());
+      this.byKey.set(key, candidate);
+      return candidate;
     }
-    this.used.add(candidate.toLowerCase());
-    this.byKey.set(key, candidate);
-    return candidate;
+  }
+
+  /**
+   * Like `allocate`, but also skips candidates that `isFree` rejects (a file already in the target
+   * that this tool did not create). A rejected candidate is never reused in this run.
+   */
+  async allocateFree(key: string, parentDir: string, desiredName: string, ext: string, isFree: (path: string) => Promise<boolean>): Promise<string> {
+    const base = sanitizeName(desiredName);
+    const existing = this.byKey.get(key);
+    if (existing && placementMatches(existing, parentDir, base, ext)) return existing;
+    for (let n = 1; n < 100_000; n += 1) {
+      const candidate = this.candidate(parentDir, base, ext, n);
+      if (this.used.has(candidate.toLowerCase())) continue;
+      this.used.add(candidate.toLowerCase());
+      if (!(await isFree(candidate))) continue;
+      this.byKey.set(key, candidate);
+      return candidate;
+    }
+    throw new Error(`Could not find a free name for ${JSON.stringify(desiredName)} in ${JSON.stringify(parentDir)}`);
   }
 }

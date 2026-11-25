@@ -8,6 +8,8 @@ export const SITE = 'https://acme.quip.com';
 
 export const ME = { id: 'uME00000001', name: 'Jane Doe' };
 export const ANN = { id: 'uANN0000001', name: 'Ann Lee' };
+/** Only ever mentioned in a comment, never an author. */
+export const BOB = { id: 'uBOB0000001', name: 'Bob Stone' };
 
 export const F_PRIV = 'fPRIVATE001';
 export const F_PROJ = 'fPROJECTS01';
@@ -17,6 +19,7 @@ export const F_LOCKED = 'fLOCKED0001';
 export const F_ARCH = 'fARCHIVE001';
 export const F_STAR = 'fSTARRED001';
 export const F_TRASH = 'fTRASH00001';
+export const F_OTHER = 'fOTHERSHR01';
 
 export const T_RENTAL = 'tRENTALthr1';
 export const T_RENTAL_SECRET = 'tRENTALthr1v';
@@ -29,6 +32,12 @@ export const T_ILLEGAL = 'ILLEGALthr1';
 export const T_SHARED = 'SHAREDthrd1';
 export const T_LOOSE = 'LOOSEthrd01';
 export const T_CHAT = 'CHATthread01';
+/** Written by Ann, in a shared folder the tests do not select. */
+export const T_OTHER = 'OTHERthrd01';
+/** Written by the user, but sitting in Trash. */
+export const T_TRASHED = 'TRASHEDthr1';
+/** Written by Ann, shared with the user directly, in no folder. */
+export const T_DIRECT = 'DIRECTthrd01';
 
 export const B_OK = 'BLOBok00001';
 export const B_GONE = 'BLOBgone001';
@@ -79,6 +88,7 @@ export const PNG_1X1 = Uint8Array.from(
   Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64'),
 );
 export const PDF_BYTES = new TextEncoder().encode('%PDF-1.4\n%mock attachment\n');
+export const XLSX_BYTES = new TextEncoder().encode('PK\u0003\u0004mock xlsx with formulas');
 
 const US = 1_000_000;
 const base = Date.UTC(2021, 1, 3, 10, 0, 0) / 1000;
@@ -135,6 +145,7 @@ export function buildFixture(): Fixture {
         message(3, 'Anchored remark\nsecond line', { annotation: { id: 'ann1' } }),
         message(4, 'See the receipt', { files: [{ hash: B_FILE, name: 'receipt.pdf' }] }),
         message(5, '1. not a list'),
+        message(6, `ping ${SITE}/${BOB.id} and see ${SITE}/${T_PLAN}/Project-Plan`, { author_id: ME.id, author_name: ME.name, mention_user_ids: [BOB.id] }),
       ],
     }),
     thread(T_PLAN, 'Project Plan', [PLAN_HTML]),
@@ -146,6 +157,9 @@ export function buildFixture(): Fixture {
     thread(T_SHARED, 'Shared doc', [SHARED_HTML], { authorId: ANN.id }),
     thread(T_LOOSE, 'Loose note', ["<h1>Loose note</h1><p class='line'>in no folder</p>"]),
     thread(T_CHAT, 'A chat', [], { type: 'CHAT' }),
+    thread(T_OTHER, "Ann's private notes", ["<h1>Ann's private notes</h1><p class='line'>not mine</p>"], { authorId: ANN.id }),
+    thread(T_TRASHED, 'Deleted draft', ["<h1>Deleted draft</h1><p class='line'>in the trash</p>"]),
+    thread(T_DIRECT, 'Shared with me directly', ["<h1>Shared with me directly</h1><p class='line'>by Ann</p>"], { authorId: ANN.id }),
   ];
   const folders: FixtureFolder[] = [
     { id: F_PRIV, title: 'Private', children: [{ thread_id: T_RENTAL }, { folder_id: F_PROJ }, { thread_id: T_NOTES_A }, { thread_id: T_NOTES_B }, { thread_id: T_ILLEGAL }] },
@@ -155,7 +169,8 @@ export function buildFixture(): Fixture {
     { id: F_LOCKED, title: 'Locked', children: [] },
     { id: F_ARCH, title: 'Archive', children: [] },
     { id: F_STAR, title: 'Starred', children: [{ thread_id: T_PLAN }] },
-    { id: F_TRASH, title: 'Trash', children: [] },
+    { id: F_TRASH, title: 'Trash', children: [{ thread_id: T_TRASHED }] },
+    { id: F_OTHER, title: 'Ann shared', children: [{ thread_id: T_OTHER }] },
   ];
   return {
     folders: Object.fromEntries(folders.map((f) => [f.id, f])),
@@ -166,7 +181,7 @@ export function buildFixture(): Fixture {
       [`${T_PLAN}/${B_FILE}`]: { type: 'application/pdf', bytes: PDF_BYTES },
       [`${T_RENTAL}/${B_FILE}`]: { type: 'application/pdf', bytes: PDF_BYTES },
     },
-    owned: [T_RENTAL, T_PLAN, T_SHEET, T_SLIDES, T_NOTES_A, T_NOTES_B, T_ILLEGAL, T_LOOSE, T_CHAT],
+    owned: [T_RENTAL, T_PLAN, T_SHEET, T_SLIDES, T_NOTES_A, T_NOTES_B, T_ILLEGAL, T_LOOSE, T_CHAT, T_OTHER, T_TRASHED, T_DIRECT],
     restrictedFolders: [F_LOCKED],
   };
 }

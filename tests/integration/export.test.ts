@@ -6,7 +6,24 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ExportEvent, ExportOptions, ExportSummary } from '../../src/core/exporter';
 import { AuthError, READ_ONLY_ENDPOINTS } from '../../src/core/quipClient';
 import { createSession } from '../../src/core/session';
-import { F_DESK, F_PRIV, F_SHARED, PNG_1X1, SITE, T_LOOSE, T_PLAN, T_RENTAL, TOKEN } from '../mock/fixture';
+import {
+  B_OK,
+  F_ARCH,
+  F_DESK,
+  F_PRIV,
+  F_PROJ,
+  F_SHARED,
+  F_STAR,
+  F_TRASH,
+  ME,
+  PNG_1X1,
+  SITE,
+  T_LOOSE,
+  T_PLAN,
+  T_RENTAL,
+  TOKEN,
+  XLSX_BYTES,
+} from '../mock/fixture';
 import { startMockQuip, type MockOptions, type MockQuip } from '../mock/quipMock';
 import { NodeFsSink, listTree, parseHtml, virtualClock } from '../helpers/env';
 
@@ -19,6 +36,9 @@ interface Ctx {
 let ctx: Ctx;
 const open: MockQuip[] = [];
 const dirs: string[] = [];
+
+/** Every top-level folder of the mock account, as the extension reports them. */
+const ALL_ROOTS = [F_PRIV, F_DESK, F_SHARED, F_ARCH, F_STAR, F_TRASH];
 
 async function setup(mockOptions: MockOptions = {}): Promise<Ctx> {
   const clock = virtualClock();
@@ -44,7 +64,7 @@ function makeSession(options: Partial<ExportOptions> = {}, extra: { onEvent?: (e
     baseUrl: c.mock.url,
     sink: new NodeFsSink(c.dir),
     parseHtml,
-    options: { rootIds: [F_PRIV, F_DESK, F_SHARED], siteUrl: SITE, ...options },
+    options: { rootIds: [F_PRIV, F_DESK, F_SHARED], allRootIds: ALL_ROOTS, ownerId: ME.id, siteUrl: SITE, timeZone: 'UTC', ...options },
     client: { minIntervalMs: 0, sleep: c.clock.sleep, now: c.clock.now, messagePageSize: 2 },
     ...(extra.onEvent ? { onEvent: extra.onEvent } : {}),
     ...(extra.signal ? { signal: extra.signal } : {}),
@@ -53,14 +73,15 @@ function makeSession(options: Partial<ExportOptions> = {}, extra: { onEvent?: (e
 
 const read = (rel: string, c: Ctx = ctx): Promise<string> => readFile(join(c.dir, rel), 'utf8');
 const visible = async (c: Ctx = ctx): Promise<string[]> => (await listTree(c.dir)).filter((p) => !p.startsWith('.'));
+const notes = async (c: Ctx = ctx): Promise<string[]> => (await visible(c)).filter((p) => p.endsWith('.md') && !p.startsWith('_Quip'));
 const requestsTo = (pattern: RegExp, c: Ctx = ctx): number => c.mock.requests.filter((r) => pattern.test(r.path)).length;
 
-async function runAll(options: Partial<ExportOptions> = {}): Promise<ExportSummary> {
-  return makeSession(options).exporter.run();
+async function runAll(options: Partial<ExportOptions> = {}, c: Ctx = ctx): Promise<ExportSummary> {
+  return makeSession(options, {}, c).exporter.run();
 }
 
 describe('full export', () => {
-  it('replicates the Quip folder tree as Markdown files, including empty folders and attachments', async () => {
+  it('replicates the Quip folder tree as Markdown files, including empty folders, attachments and spreadsheets', async () => {
     const summary = await runAll();
     expect(await visible()).toEqual([
       'Desktop/',
@@ -68,11 +89,13 @@ describe('full export', () => {
       'Private/Notes.md',
       'Private/Projects/',
       'Private/Projects/Budget.md',
+      'Private/Projects/Budget.xlsx',
       'Private/Projects/Pitch deck.md',
       'Private/Projects/Pitch deck.pdf',
       'Private/Projects/Project Plan.md',
       'Private/Q3-Q4 - plan - final.md',
       'Private/Rental Records.md',
+      'Private/Rental Records.xlsx',
       'Private/notes (2).md',
       'Team Shared/',
       'Team Shared/Shared doc.md',
@@ -86,7 +109,7 @@ describe('full export', () => {
       '_attachments/tRENTALthr1/',
       '_attachments/tRENTALthr1/receipt.pdf',
     ]);
-    expect(summary).toMatchObject({ aborted: false, docs: { planned: 9, exported: 9, skipped: 0, failed: 0, slides: 1 }, folders: 4, comments: 5 });
+    expect(summary).toMatchObject({ stopReason: 'completed', aborted: false, docs: { planned: 9, exported: 9, skipped: 0, failed: 0, notAttempted: 0, slides: 1 }, folders: 4, comments: 6 });
     expect(summary.unreadableFolders).toEqual([{ id: 'fLOCKED0001', status: 403 }]);
   });
 
@@ -112,6 +135,15 @@ describe('full export', () => {
     expect(note).toContain('Paid by **bank transfer** unless noted.');
     expect(note).toContain('**Rent**\n\n| Month | Rent | Paid |\n| --- | --- | --- |\n| Jan 2021 | 1,200 | Yes |\n| Feb 2021 | 1,200 | No \\| late |');
     expect(note).toContain('### Notes\n\n- Deposit returned in *March*\n- Agreement renewed\n  - Until 2022\n\n1. First step\n2. Second step');
+  });
+
+  it("keeps Quip's own XLSX next to notes with spreadsheets, because HTML cannot hold formulas", async () => {
+    await runAll();
+    expect(new Uint8Array(await readFile(join(ctx.dir, 'Private/Rental Records.xlsx')))).toEqual(XLSX_BYTES);
+    expect(await read('Private/Rental Records.md')).toContain('> Original spreadsheet with its formulas: [Rental Records.xlsx](Rental%20Records.xlsx)');
+    expect(await read('Private/Projects/Budget.md')).toContain('[Budget.xlsx](Budget.xlsx)');
+    expect(requestsTo(/\/export\/xlsx$/)).toBe(2); // only documents that contain spreadsheets
+    expect(await read('Private/Projects/Project Plan.md')).not.toContain('.xlsx');
   });
 
   it('converts calendar, Kanban board and project tracker live apps', async () => {
@@ -152,7 +184,7 @@ describe('full export', () => {
     expect((await readFile(join(ctx.dir, 'Private/Projects/Pitch deck.pdf'), 'utf8')).startsWith('%PDF')).toBe(true);
   });
 
-  it('exports comments with authors, anchors, mentions and attachments, across message pages', async () => {
+  it('exports comments with authors, anchors, mentions, document links and attachments, across message pages', async () => {
     await runAll();
     const note = await read('Private/Rental Records.md');
     expect(note).toContain('## Comments and conversation');
@@ -161,14 +193,19 @@ describe('full export', () => {
     expect(note).toContain('· *on highlighted text*\n> Anchored remark\n> second line');
     expect(note).toContain('> 📎 [receipt.pdf](../_attachments/tRENTALthr1/receipt.pdf)');
     expect(note).toContain('> 1\\. not a list');
-    expect(requestsTo(/^\/1\/messages\//)).toBeGreaterThan(8); // 5 messages at 2 per page needs 3 requests for one doc
+    expect(requestsTo(/^\/1\/messages\//)).toBeGreaterThan(8); // 6 messages at 2 per page needs several requests for one doc
   });
 
-  it('resolves links between documents and flags links that leave the export', async () => {
+  it('looks up people mentioned only in a comment and links comment URLs to exported notes', async () => {
+    await runAll();
+    expect(await read('Private/Rental Records.md')).toContain('> ping @Bob Stone and see [Project Plan](Projects/Project%20Plan.md)');
+  });
+
+  it('resolves links between documents, keeps the original URL for links that leave the export, and flags them', async () => {
     const summary = await runAll();
     const plan = await read('Private/Projects/Project Plan.md');
     expect(plan).toContain('[Rental Records](../Rental%20Records.md)');
-    expect(plan).toContain('[a doc outside the export](https://acme.quip.com/zZ9yY8xX7wWv)');
+    expect(plan).toContain('[a doc outside the export](https://acme.quip.com/zZ9yY8xX7wWv/Elsewhere)');
     expect(summary.unresolvedLinks).toEqual(['zZ9yY8xX7wWv']);
     expect(await read('_Quip export report.md')).toContain('`zZ9yY8xX7wWv`');
   });
@@ -195,7 +232,7 @@ describe('full export', () => {
     await runAll();
     expect(await read('.quip-raw/PLANthread1/body.html')).toContain("data-live-app-id='AbNBjAC13no'");
     expect(JSON.parse(await read('.quip-raw/PLANthread1/thread.json'))).toMatchObject({ meta: { id: 'PLANthread1', title: 'Project Plan' } });
-    expect(JSON.parse(await read(`.quip-raw/${T_RENTAL}/messages.json`))).toHaveLength(5);
+    expect(JSON.parse(await read(`.quip-raw/${T_RENTAL}/messages.json`))).toHaveLength(6);
   });
 
   it('writes a report that tallies embeds and lists what needs attention', async () => {
@@ -214,7 +251,7 @@ describe('full export', () => {
     const moved = await setup();
     const loose = moved.mock.fixture.threads[T_LOOSE];
     if (loose) loose.movedTo = 'https://slack.example/canvas/1';
-    await makeSession({}, {}, moved).exporter.run();
+    await runAll({}, moved);
     const note = await read('_Unfiled/Loose note.md', moved);
     expect(note).toContain('moved_to: "https://slack.example/canvas/1"');
     expect(note).toContain('# Loose note\n\n> [!info] This Quip document was moved to https://slack.example/canvas/1');
@@ -243,27 +280,137 @@ describe('scope and options', () => {
     expect(requestsTo(/\/html$/)).toBe(0);
   });
 
-  it('can leave out comments, the raw archive and unfiled documents', async () => {
-    await runAll({ includeComments: false, keepRaw: false, includeUnfiled: false });
+  it('can leave out comments, the raw archive, spreadsheets sidecars and unfiled documents', async () => {
+    await runAll({ includeComments: false, keepRaw: false, saveXlsx: false, includeUnfiled: false });
     const tree = await listTree(ctx.dir);
     expect(tree.some((p) => p.startsWith('.quip-raw'))).toBe(false);
+    expect(tree.some((p) => p.endsWith('.xlsx'))).toBe(false);
     expect(tree).not.toContain('_Unfiled/Loose note.md');
     expect(await read('Private/Rental Records.md')).not.toContain('Comments and conversation');
     expect(requestsTo(/^\/1\/messages\//)).toBe(0);
+    expect(requestsTo(/\/export\/xlsx$/)).toBe(0);
   });
 
   it('limits the number of documents for a trial run', async () => {
     const summary = await runAll({ maxDocs: 2 });
     expect(summary.docs.planned).toBe(2);
-    expect((await visible()).filter((p) => p.endsWith('.md') && !p.startsWith('_'))).toHaveLength(2);
+    expect((await notes()).filter((p) => !p.startsWith('_'))).toHaveLength(2);
   });
 
-  it('exports a single document by id, with links to everything else pointing back to Quip', async () => {
+  it('exports a single document by id, with links to everything else pointing back to Quip as written', async () => {
     const summary = await runAll({ rootIds: [], threadIds: [T_PLAN], includeUnfiled: false });
     expect(summary.docs.exported).toBe(1);
     const note = await read('Project Plan.md');
-    expect(note).toContain('[Rental Records](https://acme.quip.com/tRENTALthr1v)');
+    expect(note).toContain('[Rental Records](https://acme.quip.com/tRENTALthr1v/Rental-Records#temp:C:abc)');
     expect(note).not.toContain('folder:');
+  });
+
+  it('exports only documents the user wrote that sit in no folder anywhere, never other people\'s or trashed ones', async () => {
+    const summary = await runAll();
+    const unfiled = (await visible()).filter((p) => p.startsWith('_Unfiled/'));
+    expect(unfiled).toEqual(['_Unfiled/', '_Unfiled/Loose note.md']);
+    expect(await notes()).not.toContain('_Unfiled/Deleted draft.md'); // in Trash: it is in a folder, just not a selected one
+    expect(summary.othersUnfiled).toBe(2); // Ann's directly shared document and her document in a folder the user does not list
+    expect(await read('_Quip export report.md')).toContain('2 documents written by other people');
+  });
+
+  it('refuses to guess ownership: without the signed-in user, unfiled documents are skipped', async () => {
+    const events: ExportEvent[] = [];
+    const summary = await makeSession({ ownerId: undefined }, { onEvent: (e) => events.push(e) }).exporter.run();
+    expect(summary.docs.planned).toBe(8);
+    expect(events.some((e) => e.type === 'log' && e.level === 'warn' && /unfiled/i.test(e.message))).toBe(true);
+  });
+});
+
+describe('never overwriting what this tool did not create', () => {
+  it('leaves an existing unrelated note alone and writes the Quip document beside it', async () => {
+    await mkdir(join(ctx.dir, 'Private'), { recursive: true });
+    await writeFile(join(ctx.dir, 'Private/Notes.md'), 'MY OWN NOTES, NOT FROM QUIP');
+    await runAll();
+    expect(await read('Private/Notes.md')).toBe('MY OWN NOTES, NOT FROM QUIP');
+    expect(await read('Private/Notes (2).md')).toContain('quip_id: "NOTESthrdA1"');
+    expect(await read('Private/notes (3).md')).toContain('quip_id: "NOTESthrdB1"');
+  });
+
+  it('leaves an existing unrelated attachment alone', async () => {
+    await mkdir(join(ctx.dir, '_attachments/PLANthread1'), { recursive: true });
+    await writeFile(join(ctx.dir, `_attachments/PLANthread1/${B_OK}.png`), 'MY OWN FILE');
+    await runAll();
+    expect(await read(`_attachments/PLANthread1/${B_OK}.png`)).toBe('MY OWN FILE');
+    expect(new Uint8Array(await readFile(join(ctx.dir, `_attachments/PLANthread1/${B_OK} (2).png`)))).toEqual(PNG_1X1);
+    expect(await read('Private/Projects/Project Plan.md')).toContain(`![architecture](../../_attachments/PLANthread1/${B_OK}%20%282%29.png)`);
+  });
+
+  it('recognises its own earlier note by quip_id, so lost state does not create duplicates', async () => {
+    await runAll();
+    const before = await notes();
+    await rm(join(ctx.dir, '.quip-md-export'), { recursive: true });
+    const again = await runAll();
+    expect(again.docs.exported).toBe(9);
+    expect(await notes()).toEqual(before);
+  });
+
+  it('never lets a Quip document or folder take a name the tool itself uses', async () => {
+    const odd = await setup();
+    const loose = odd.mock.fixture.threads[T_LOOSE];
+    if (loose) loose.title = '_Quip export report';
+    const priv = odd.mock.fixture.folders[F_PRIV];
+    if (priv) priv.title = '_attachments';
+    await runAll({ rootIds: [F_PRIV], threadIds: [T_LOOSE], includeUnfiled: false }, odd);
+    const tree = await visible(odd);
+    expect(tree).toContain('_Quip export report (2).md');
+    expect(await read('_Quip export report.md', odd)).toMatch(/^# Quip export report\n/);
+    expect(tree).toContain('_attachments (2)/');
+    expect(tree).toContain('_attachments/PLANthread1/BLOBok00001.png');
+  });
+});
+
+describe('where documents end up', () => {
+  it('lets the first root claim a document, even when it is nested deeper than a later root\'s copy', async () => {
+    const dup = await setup();
+    dup.mock.fixture.folders[F_DESK]?.children.push({ thread_id: T_PLAN });
+    await runAll({ rootIds: [F_PRIV, F_DESK] }, dup);
+    const note = await read('Private/Projects/Project Plan.md', dup);
+    expect(note).toContain('folder: "Private/Projects"');
+    expect(note).toContain('also_in:\n  - "Desktop"');
+    expect(await visible(dup)).not.toContain('Desktop/Project Plan.md');
+  });
+
+  it('writes a moved or renamed document to its new place, leaves the old copy, and says so in the report', async () => {
+    await runAll();
+    const plan = ctx.mock.fixture.threads[T_PLAN];
+    if (plan) {
+      plan.title = 'Renamed plan';
+      plan.updated += 1_000_000;
+    }
+    const summary = await runAll();
+    expect(summary.relocated).toEqual([{ id: T_PLAN, title: 'Renamed plan', from: 'Private/Projects/Project Plan.md', to: 'Private/Projects/Renamed plan.md' }]);
+    expect(await visible()).toEqual(expect.arrayContaining(['Private/Projects/Project Plan.md', 'Private/Projects/Renamed plan.md']));
+    expect(await read('Private/Projects/Renamed plan.md')).toContain('title: "Renamed plan"');
+    expect(await read('_Quip export report.md')).toContain('`Private/Projects/Project Plan.md` is now `Private/Projects/Renamed plan.md`');
+  });
+
+  it('re-renders notes whose link targets moved, so links never point at a stale copy', async () => {
+    await runAll();
+    const rental = ctx.mock.fixture.threads[T_RENTAL];
+    if (rental) {
+      rental.title = 'Rental history';
+      rental.updated += 1_000_000;
+    }
+    const again = await runAll();
+    expect(again.docs.exported).toBe(2); // the renamed document and Project Plan, which links to it
+    expect(await read('Private/Projects/Project Plan.md')).toContain('[Rental Records](../Rental%20history.md)');
+  });
+
+  it('re-renders a note when a link that used to leave the export now stays inside it', async () => {
+    const first = await runAll({ rootIds: [F_PROJ] });
+    expect(first.unresolvedLinks).toContain(T_RENTAL.slice(0, 11) + 'v');
+    expect(await read('Projects/Project Plan.md')).toContain('https://acme.quip.com/tRENTALthr1v/Rental-Records');
+
+    const second = await runAll({ rootIds: [F_PROJ, F_PRIV] });
+    expect(second.docs.skipped).toBeGreaterThan(0); // Budget and the slides did not change
+    expect(await read('Projects/Project Plan.md')).toContain('[Rental Records](../Private/Rental%20Records.md)');
+    expect(second.unresolvedLinks).not.toContain('tRENTALthr1v');
   });
 });
 
@@ -275,6 +422,10 @@ describe('resuming', () => {
     const again = await runAll();
     expect(again.docs).toMatchObject({ exported: 0, skipped: 9, failed: 0 });
     expect(ctx.mock.requests.slice(before).some((r) => /\/html$/.test(r.path))).toBe(false);
+    // The report still describes the whole export, not just this run.
+    expect(again.embeds).toMatchObject({ calendar: 1, kanban: 1, project_tracker: 1 });
+    expect(again.warnings['attachment-missing']).toBeDefined();
+    expect(again.unresolvedLinks).toEqual(['zZ9yY8xX7wWv']);
 
     const plan = ctx.mock.fixture.threads[T_PLAN];
     if (plan) plan.updated += 1_000_000;
@@ -292,23 +443,19 @@ describe('resuming', () => {
     expect((await runAll({ includeComments: false })).docs.exported).toBe(9);
   });
 
-  it('keeps the same file names across runs even if a document is renamed in Quip', async () => {
-    await runAll();
-    const plan = ctx.mock.fixture.threads[T_PLAN];
-    if (plan) {
-      plan.title = 'Renamed plan';
-      plan.updated += 1_000_000;
-    }
-    await runAll();
-    expect(await visible()).toContain('Private/Projects/Project Plan.md');
-    expect(await visible()).not.toContain('Private/Projects/Renamed plan.md');
-    expect(await read('Private/Projects/Project Plan.md')).toContain('title: "Renamed plan"');
+  it('enabling the raw archive later actually creates it, instead of skipping unchanged notes', async () => {
+    await runAll({ keepRaw: false });
+    expect((await listTree(ctx.dir)).some((p) => p.startsWith('.quip-raw'))).toBe(false);
+    const summary = await runAll({ keepRaw: true });
+    expect(summary.docs.exported).toBe(9);
+    expect(await read('.quip-raw/PLANthread1/body.html')).toContain('data-live-app-id');
   });
 
   it('stops cleanly when aborted, saves progress, and finishes on the next run', async () => {
     const controller = new AbortController();
     const first = await makeSession({}, { signal: controller.signal, onEvent: (e) => e.type === 'doc' && e.index === 1 && controller.abort() }).exporter.run();
     expect(first.aborted).toBe(true);
+    expect(first.stopReason).toBe('aborted');
     expect(first.docs.exported).toBe(1);
     expect(await read('_Quip export report.md')).toContain('Stopped early');
 
@@ -330,16 +477,16 @@ describe('resuming', () => {
 describe('when Quip misbehaves', () => {
   it('waits out rate limits and still produces the same export', async () => {
     const limited = await setup({ throttleEvery: 4 });
-    const summary = await makeSession({}, {}, limited).exporter.run();
+    const summary = await runAll({}, limited);
     expect(summary.docs).toMatchObject({ exported: 9, failed: 0 });
     expect(summary.rateLimitPauses).toBeGreaterThan(0);
     expect(limited.clock.slept.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(1000);
     expect(await read('Private/Projects/Project Plan.md', limited)).toContain('**Kanban board**');
   });
 
-  it('isolates a failing document: the others are exported and a retry fixes only that one', async () => {
+  it('isolates a failing document: the others are exported and the report says what failed', async () => {
     const broken = await setup({ override: (req) => (req.path === `/2/threads/${T_PLAN}/html` ? { status: 500, body: { error: 'boom' } } : undefined) });
-    const summary = await makeSession({}, {}, broken).exporter.run();
+    const summary = await runAll({}, broken);
     expect(summary.docs).toMatchObject({ exported: 8, failed: 1 });
     expect(summary.failures).toEqual([expect.objectContaining({ id: T_PLAN, stage: 'fetch' })]);
     expect(await read('_Quip export report.md', broken)).toContain('Finished with problems');
@@ -349,14 +496,58 @@ describe('when Quip misbehaves', () => {
   it('retries only the failed document once Quip recovers', async () => {
     let failing = true;
     const flaky = await setup({ override: (req) => (failing && req.path === `/2/threads/${T_PLAN}/html` ? { status: 500 } : undefined) });
-    await makeSession({}, {}, flaky).exporter.run();
+    await runAll({}, flaky);
     failing = false;
-    const retry = await makeSession({}, {}, flaky).exporter.run();
+    const retry = await runAll({}, flaky);
     expect(retry.docs).toMatchObject({ exported: 1, skipped: 8, failed: 0 });
     expect(await visible(flaky)).toContain('Private/Projects/Project Plan.md');
   });
 
-  it('stops everything when the token is rejected, without writing partial output', async () => {
+  it('does not mark a document complete when an attachment failed for a transient reason: the next run retries it', async () => {
+    let failing = true;
+    const flaky = await setup({ override: (req) => (failing && req.path === `/1/blob/${T_PLAN}/${B_OK}` ? { status: 500 } : undefined) });
+    const first = await runAll({}, flaky);
+    expect(first.attachments.missing).toBe(2); // the image that failed transiently, plus the one Quip refuses outright
+    expect(await read('Private/Projects/Project Plan.md', flaky)).toContain('*[missing image: architecture]*');
+
+    failing = false;
+    const second = await runAll({}, flaky);
+    expect(second.docs).toMatchObject({ exported: 1, skipped: 8 });
+    expect(await read('Private/Projects/Project Plan.md', flaky)).toContain('![architecture](../../_attachments/PLANthread1/BLOBok00001.png)');
+    // The refused image (HTTP 403) is permanent: it is reported, and not retried forever.
+    const third = await runAll({}, flaky);
+    expect(third.docs).toMatchObject({ exported: 0, skipped: 9 });
+    expect(third.warnings['attachment-missing']).toBeDefined();
+  });
+
+  it('retries a spreadsheet sidecar that failed transiently', async () => {
+    let failing = true;
+    const flaky = await setup({ override: (req) => (failing && req.path === `/1/threads/${T_RENTAL}/export/xlsx` ? { status: 500 } : undefined) });
+    const first = await runAll({}, flaky);
+    expect(first.warnings['xlsx-failed']).toBeDefined();
+    expect(await visible(flaky)).not.toContain('Private/Rental Records.xlsx');
+    failing = false;
+    const second = await runAll({}, flaky);
+    expect(second.docs.exported).toBe(1);
+    expect(await visible(flaky)).toContain('Private/Rental Records.xlsx');
+  });
+
+  it('reports a rejected token honestly: stopped, how many were not exported, and nothing is lost', async () => {
+    let htmlCalls = 0;
+    let revoked = true;
+    const revoking = await setup({ override: (req) => (revoked && /\/html$/.test(req.path) && ++htmlCalls === 3 ? { status: 401 } : undefined) }); // Rental Records has 2 HTML pages, so the 3rd request is the 2nd document
+    await expect(runAll({}, revoking)).rejects.toBeInstanceOf(AuthError);
+    const report = await read('_Quip export report.md', revoking);
+    expect(report).toContain('Status: Stopped: Quip rejected the access token (8 documents were not exported');
+    expect(report).not.toContain('Status: Finished');
+    expect(JSON.parse(await read('.quip-md-export/report.json', revoking))).toMatchObject({ stopReason: 'auth-error', docs: { exported: 1, notAttempted: 8 } });
+
+    revoked = false; // a new token: the run continues where it stopped
+    const resumed = await runAll({}, revoking);
+    expect(resumed.docs).toMatchObject({ exported: 8, skipped: 1, failed: 0 });
+  });
+
+  it('stops everything when the token is rejected at the start, without writing partial output', async () => {
     const { exporter } = makeSession({}, { token: 'wrong-token' });
     await expect(exporter.run()).rejects.toBeInstanceOf(AuthError);
     expect(await listTree(ctx.dir)).toEqual([]);
@@ -365,7 +556,7 @@ describe('when Quip misbehaves', () => {
 
   it('survives a thread that Quip lists but will not return', async () => {
     const odd = await setup({ override: (req) => (req.path === '/2/threads/' && req.query.ids?.includes('NOTESthrdA1') ? { status: 403 } : undefined) });
-    const summary = await makeSession({}, {}, odd).exporter.run();
+    const summary = await runAll({}, odd);
     expect(summary.docs.failed).toBe(0);
     expect(summary.unreadableThreads.map((t) => t.id)).toContain('NOTESthrdA1');
     expect(summary.docs.exported).toBe(8);
@@ -377,7 +568,7 @@ describe('file layout helpers', () => {
     const evil = await setup();
     const t = evil.mock.fixture.threads[T_LOOSE];
     if (t) t.title = '../../escape';
-    await makeSession({}, {}, evil).exporter.run();
+    await runAll({}, evil);
     const tree = await listTree(evil.dir);
     expect(tree).toContain('_Unfiled/__-..-escape.md');
     expect(tree.every((p) => p.split('/').every((segment) => segment !== '..' && segment !== '.'))).toBe(true);

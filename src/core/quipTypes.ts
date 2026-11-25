@@ -54,6 +54,7 @@ export interface QuipApi {
   getMessages(id: string): Promise<QuipMessage[]>;
   getBlob(threadId: string, blobId: string): Promise<BinaryResponse>;
   getSlidesPdf(threadId: string): Promise<BinaryResponse>;
+  getXlsx(threadId: string): Promise<BinaryResponse>;
   getUsers(ids: string[]): Promise<Map<string, string>>;
   listOwnedThreads(): Promise<OwnedThread[]>;
 }

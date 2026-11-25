@@ -10,6 +10,7 @@ import {
 export class Cx {
   readonly blobs: BlobRef[] = [];
   readonly docLinks = new Set<string>();
+  readonly docUrls: Record<string, string> = {};
   readonly embeds: Record<string, number> = {};
   readonly warnings: Warning[] = [];
   readonly unknownUsers = new Set<string>();
@@ -44,8 +45,9 @@ export class Cx {
     return `${BLOB_SCHEME}${key}`;
   }
 
-  doc(idOrSecretPath: string): string {
+  doc(idOrSecretPath: string, href?: string): string {
     this.docLinks.add(idOrSecretPath);
+    if (href && !(idOrSecretPath in this.docUrls)) this.docUrls[idOrSecretPath] = href;
     return `${DOC_SCHEME}${idOrSecretPath}`;
   }
 

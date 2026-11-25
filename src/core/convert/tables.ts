@@ -155,10 +155,10 @@ function trimEmptyEdges(rows: string[][]): string[][] {
 
 /**
  * Quip renders spreadsheets with a header row of column letters, sometimes with a first column of
- * row numbers. Those are UI chrome, not data. A letters-only header (no row-number column) is
- * dropped only when `lettersOnly` is set, i.e. for tables known to be spreadsheets.
+ * row numbers. Those are UI chrome, not data. Only call this for tables known to be spreadsheets:
+ * an ordinary table could legitimately look the same.
  */
-export function normalizeSpreadsheetGrid(rows: string[][], lettersOnly = false): string[][] {
+export function normalizeSpreadsheetGrid(rows: string[][]): string[][] {
   let out = rows;
   const first = out[0];
   if (first && first.length >= 2 && first[0]?.trim() === '' && first.slice(1).every((v, i) => v.trim() === columnLabel(i))) {
@@ -166,7 +166,7 @@ export function normalizeSpreadsheetGrid(rows: string[][], lettersOnly = false):
     const nums = out.map((r) => r[0]?.trim() ?? '');
     const sequential = nums.length > 0 && nums.every((v, i) => /^\d+$/.test(v) && (i === 0 || Number(v) > Number(nums[i - 1])));
     if (sequential) out = out.map((r) => r.slice(1));
-  } else if (lettersOnly && first && first.length >= 1 && first.every((v, i) => v.trim() === columnLabel(i))) {
+  } else if (first && first.length >= 1 && first.every((v, i) => v.trim() === columnLabel(i))) {
     out = out.slice(1);
   }
   return trimEmptyEdges(out);
@@ -193,13 +193,13 @@ export function gridToMarkdown(grid: Grid): string {
 }
 
 export interface TableOptions {
-  /** true: the table is a Quip spreadsheet, so strip all of its chrome. false: keep every row. Default: strip only the unmistakable pattern. */
+  /** The table is a confirmed Quip spreadsheet (inside data-section-style="13"): strip its letter header and row numbers. */
   spreadsheet?: boolean;
 }
 
 export function renderTable(cx: Cx, table: Element, opts: TableOptions = {}): string {
   const grid = tableToGrid(cx, table);
-  grid.rows = opts.spreadsheet === false ? trimEmptyEdges(grid.rows) : normalizeSpreadsheetGrid(grid.rows, opts.spreadsheet === true);
+  grid.rows = opts.spreadsheet === true ? normalizeSpreadsheetGrid(grid.rows) : trimEmptyEdges(grid.rows);
   return gridToMarkdown(grid);
 }
 

@@ -35,12 +35,21 @@ describe('sanitizeName', () => {
 });
 
 describe('PathAllocator', () => {
-  it('disambiguates case-insensitively and is stable per key', () => {
+  it('disambiguates case-insensitively and keeps a name stable while its folder and title are unchanged', () => {
     const a = new PathAllocator();
     expect(a.allocate('t1', 'Work', 'Notes', '.md')).toBe('Work/Notes.md');
     expect(a.allocate('t2', 'Work', 'notes', '.md')).toBe('Work/notes (2).md');
     expect(a.allocate('t3', 'Work', 'NOTES', '.md')).toBe('Work/NOTES (3).md');
-    expect(a.allocate('t1', 'Elsewhere', 'Other', '.md')).toBe('Work/Notes.md');
+    expect(a.allocate('t2', 'Work', 'notes', '.md')).toBe('Work/notes (2).md');
+    expect(a.allocate('t1', 'Work', 'NOTES', '.md')).toBe('Work/Notes.md'); // a case-only change is not a rename
+  });
+
+  it('gives a document a new path when its folder or title changes, and never hands out the old one again', () => {
+    const a = new PathAllocator();
+    expect(a.allocate('t1', 'Work', 'Notes', '.md')).toBe('Work/Notes.md');
+    expect(a.allocate('t1', 'Elsewhere', 'Notes', '.md')).toBe('Elsewhere/Notes.md');
+    expect(a.allocate('t1', 'Elsewhere', 'Renamed', '.md')).toBe('Elsewhere/Renamed.md');
+    expect(a.allocate('t9', 'Work', 'Notes', '.md')).toBe('Work/Notes (2).md'); // the stale copy still occupies its name
   });
 
   it('honours a seeded snapshot so re-runs keep their paths and new items avoid them', () => {
@@ -55,6 +64,21 @@ describe('PathAllocator', () => {
     const a = new PathAllocator();
     expect(a.allocate('f1', '', 'Plans')).toBe('Plans');
     expect(a.allocate('t1', '', 'Plans', '.md')).toBe('Plans.md');
+  });
+
+  it('keeps reserved names for the tool itself', () => {
+    const a = new PathAllocator();
+    a.reserve('_Quip export report.md');
+    expect(a.allocate('t1', '', '_Quip export report', '.md')).toBe('_Quip export report (2).md');
+  });
+
+  it('skips names that something else already occupies, and never reuses a rejected name', async () => {
+    const a = new PathAllocator();
+    const occupied = new Set(['Work/Notes.md', 'Work/Notes (2).md']);
+    const free = (p: string): Promise<boolean> => Promise.resolve(!occupied.has(p));
+    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', free)).toBe('Work/Notes (3).md');
+    expect(await a.allocateFree('t2', 'Work', 'Notes', '.md', () => Promise.resolve(true))).toBe('Work/Notes (4).md');
+    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', () => Promise.resolve(false))).toBe('Work/Notes (3).md'); // stable, no re-check
   });
 });
 

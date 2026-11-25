@@ -46,7 +46,7 @@ export const READ_ONLY_ENDPOINTS: readonly RegExp[] = [
   /^\/2\/threads\/[A-Za-z0-9]{8,32}\/html$/,
   /^\/1\/messages\/[A-Za-z0-9]{8,32}$/,
   /^\/1\/blob\/[A-Za-z0-9]{8,32}\/[\w-]{8,64}$/,
-  /^\/1\/threads\/[A-Za-z0-9]{8,32}\/export\/pdf$/,
+  /^\/1\/threads\/[A-Za-z0-9]{8,32}\/export\/(pdf|xlsx)$/,
 ];
 
 export function assertReadOnly(method: string, path: string): void {
@@ -82,6 +82,13 @@ type Query = Record<string, string | number | boolean | undefined>;
 const ENTITY_ID_RE = /^[A-Za-z0-9]{8,32}$/;
 const BLOB_ID_RE = /^[\w-]{8,64}$/;
 const MAX_WAIT_MS = 3_600_000;
+const MAX_THROTTLE_WAITS = 30;
+/** [remaining header, reset header] for each rate-limit pool Quip documents. */
+const RATE_POOLS: ReadonlyArray<readonly [string, string]> = [
+  ['x-ratelimit-remaining', 'x-ratelimit-reset'],
+  ['x-company-ratelimit-remaining', 'x-company-ratelimit-reset'],
+  ['x-documentbulkexport-ratelimit-remaining', 'x-documentbulkexport-ratelimit-reset'],
+];
 
 const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
   new Promise((resolve, reject) => {
@@ -110,6 +117,11 @@ function requireId(id: string): string {
 function requireBlobId(id: string): string {
   if (!BLOB_ID_RE.test(id)) throw new RangeError(`Invalid Quip blob identifier: ${JSON.stringify(id.slice(0, 40))}`);
   return id;
+}
+
+/** An error object in place of data, e.g. {"error": "...", "error_code": 403}. Real entries carry an id, folder or thread. */
+function isErrorEntry(raw: unknown): raw is Record<string, unknown> {
+  return isObj(raw) && (typeof raw.error === 'string' || typeof raw.error_code === 'number') && raw.id === undefined && raw.folder === undefined && raw.thread === undefined;
 }
 
 function chunk<T>(items: readonly T[], size: number): T[][] {
@@ -189,8 +201,15 @@ export class QuipClient implements QuipApi {
     await this.sleepFn(ms, this.signal);
   }
 
-  private async send(path: string, query: Query, accept: string): Promise<Response> {
+  /**
+   * `redirect` is "error" for JSON endpoints, which never legitimately redirect, so a redirect can
+   * never steer an authenticated request somewhere the allow-list has not approved. Downloads may
+   * follow redirects (a file can live on a CDN); fetch drops the Authorization header when the
+   * target is another origin.
+   */
+  private async send(path: string, query: Query, accept: string, redirect: RequestRedirect): Promise<Response> {
     const url = this.buildUrl(path, query);
+    let throttled = 0;
     for (let attempt = 0; ; attempt += 1) {
       this.signal?.throwIfAborted();
       await this.pace();
@@ -201,6 +220,7 @@ export class QuipClient implements QuipApi {
           headers: { Authorization: `Bearer ${this.token}`, Accept: accept },
           credentials: 'omit',
           cache: 'no-store',
+          redirect,
           referrerPolicy: 'no-referrer',
           ...(this.signal ? { signal: this.signal } : {}),
         });
@@ -212,18 +232,21 @@ export class QuipClient implements QuipApi {
       }
 
       this.onEvent?.({ type: 'request', path, status: res.status });
+      if (res.redirected) this.assertSafeRedirect(res.url, path);
       this.observe(res.headers);
       if (res.ok) return res;
 
       if (res.status === 429 || res.status === 503) {
         const wait = this.throttleDelay(res.headers);
         if (wait !== undefined) {
+          throttled += 1;
+          if (throttled > MAX_THROTTLE_WAITS) throw new QuipHttpError(res.status, path, 'the rate limit did not clear after repeated waits');
           this.blockedUntil = this.now() + wait;
           await this.waitFor(wait, 'rate-limit', path);
           continue;
         }
       }
-      if (res.status >= 500 && attempt < this.maxRetries) {
+      if ((res.status >= 500 || res.status === 429) && attempt < this.maxRetries) {
         await this.waitFor(Math.min(30_000, 1000 * 2 ** attempt), 'service', path);
         continue;
       }
@@ -233,30 +256,41 @@ export class QuipClient implements QuipApi {
     }
   }
 
-  /** When the quota is spent, wait until it resets instead of failing. */
-  private observe(headers: Headers): void {
-    const remaining = headerNumber(headers, ['x-ratelimit-remaining', 'x-company-ratelimit-remaining']);
-    if (remaining !== undefined && remaining <= 0) {
-      const delay = this.throttleDelay(headers);
-      if (delay !== undefined) this.blockedUntil = Math.max(this.blockedUntil, this.now() + delay);
-    }
+  private assertSafeRedirect(finalUrl: string, path: string): void {
+    const u = new URL(finalUrl);
+    const loopback = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    if (u.protocol !== 'https:' && !loopback) throw new QuipHttpError(0, path, 'refused a redirect to a non-HTTPS address');
   }
 
-  /** Milliseconds to wait, or undefined when the response gives no sign that the quota is the problem. */
+  /** After a response that spends a quota, hold the next request back instead of provoking a 503. */
+  private observe(headers: Headers): void {
+    const delay = this.throttleDelay(headers);
+    if (delay !== undefined) this.blockedUntil = Math.max(this.blockedUntil, this.now() + delay);
+  }
+
+  /**
+   * Milliseconds to wait, or undefined when the response gives no sign that a quota is the problem.
+   * The user, company and bulk-export pools are checked separately: only a pool whose remaining
+   * count is zero (or an explicit Retry-After) means "wait"; a 503 that arrives with quota to spare
+   * is a service failure and goes through the ordinary bounded retries.
+   */
   private throttleDelay(headers: Headers): number | undefined {
+    const now = this.now();
     const retryAfter = headerNumber(headers, ['retry-after', 'x-company-retry-after', 'x-documentbulkexport-retry-after']);
-    const resetAt = headerNumber(headers, ['x-ratelimit-reset', 'x-company-ratelimit-reset', 'x-documentbulkexport-ratelimit-reset']);
-    const remaining = headerNumber(headers, ['x-ratelimit-remaining', 'x-company-ratelimit-remaining']);
-    let wait: number | undefined;
-    if (retryAfter !== undefined) wait = retryAfter * 1000;
-    else if (resetAt !== undefined && resetAt * 1000 > this.now()) wait = resetAt * 1000 - this.now();
-    else if (remaining === 0) wait = 5000;
+    let wait: number | undefined = retryAfter !== undefined ? retryAfter * 1000 : undefined;
+    for (const [remainingHeader, resetHeader] of RATE_POOLS) {
+      const remaining = headerNumber(headers, [remainingHeader]);
+      if (remaining === undefined || remaining > 0) continue;
+      const resetAt = headerNumber(headers, [resetHeader]);
+      const untilReset = resetAt !== undefined ? Math.max(0, resetAt * 1000 - now) : 5000;
+      wait = Math.max(wait ?? 0, untilReset);
+    }
     if (wait === undefined) return undefined;
     return Math.min(MAX_WAIT_MS, Math.max(1000, wait + 1000));
   }
 
   private async getJson(path: string, query: Query = {}): Promise<unknown> {
-    const res = await this.send(path, query, 'application/json');
+    const res = await this.send(path, query, 'application/json', 'error');
     const text = await res.text();
     try {
       return JSON.parse(text) as unknown;
@@ -266,7 +300,7 @@ export class QuipClient implements QuipApi {
   }
 
   private async getBytes(path: string, query: Query = {}): Promise<BinaryResponse> {
-    const res = await this.send(path, query, '*/*');
+    const res = await this.send(path, query, '*/*', 'follow');
     return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: res.headers.get('content-type') ?? '' };
   }
 
@@ -298,7 +332,9 @@ export class QuipClient implements QuipApi {
             : {};
         for (const id of group) {
           const raw = map[id];
-          out.set(id, raw === undefined || raw === null ? { ok: false, status: 404, message: 'not returned by Quip' } : { ok: true, value: parse(id, raw), raw });
+          if (raw === undefined || raw === null) out.set(id, { ok: false, status: 404, message: 'not returned by Quip' });
+          else if (isErrorEntry(raw)) out.set(id, { ok: false, status: typeof raw.error_code === 'number' ? raw.error_code : 400, message: String(raw.error ?? raw.error_description ?? 'error entry') });
+          else out.set(id, { ok: true, value: parse(id, raw), raw });
         }
       } catch (err) {
         if (err instanceof QuipHttpError && !(err instanceof AuthError) && err.status >= 400 && err.status < 500 && err.status !== 429) {
@@ -357,7 +393,8 @@ export class QuipClient implements QuipApi {
         for (let page = 0; page < 5000; page += 1) {
           const body = await this.getJson(path, cursor ? { cursor } : {});
           const root = isObj(body) ? body : {};
-          parts.push(typeof root.html === 'string' ? root.html : '');
+          if (typeof root.html !== 'string') throw new QuipHttpError(200, path, `page ${page + 1} had no html field; refusing to treat a partial document as complete`);
+          parts.push(root.html);
           const meta = isObj(root.response_metadata) ? root.response_metadata : {};
           cursor = typeof meta.next_cursor === 'string' && meta.next_cursor !== '' ? meta.next_cursor : undefined;
           if (!cursor) return parts.join('');
@@ -389,8 +426,10 @@ export class QuipClient implements QuipApi {
           added += 1;
         }
       }
-      if (list.length < this.pageSize || added === 0 || !Number.isFinite(oldest)) break;
-      maxCreated = oldest - 1;
+      if (list.length < this.pageSize || !Number.isFinite(oldest)) break;
+      // Inclusive cursor: messages sharing the boundary timestamp may straddle two pages, and ids de-duplicate.
+      // If a whole page was already seen, more messages share one timestamp than fit in a page, so step past it.
+      maxCreated = added === 0 ? oldest - 1 : oldest;
     }
     return [...byId.values()].sort((a, b) => a.createdUsec - b.createdUsec);
   }
@@ -401,6 +440,11 @@ export class QuipClient implements QuipApi {
 
   async getSlidesPdf(threadId: string): Promise<BinaryResponse> {
     return this.getBytes(`/1/threads/${requireId(threadId)}/export/pdf`);
+  }
+
+  /** Quip's own XLSX rendering of a spreadsheet or of a document's embedded spreadsheets (keeps formulas). */
+  async getXlsx(threadId: string): Promise<BinaryResponse> {
+    return this.getBytes(`/1/threads/${requireId(threadId)}/export/xlsx`);
   }
 
   async getUsers(ids: string[]): Promise<Map<string, string>> {

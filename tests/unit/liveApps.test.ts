@@ -121,11 +121,26 @@ describe('date handling', () => {
     const pst = Date.UTC(2020, 10, 18, 8, 0, 0); // midnight at UTC-8
     const ist = Date.UTC(2020, 10, 17, 18, 30, 0); // midnight at UTC+5:30
     const utc = Date.UTC(2020, 10, 18, 0, 0, 0);
-    expect([pst, ist, utc].map(epochToDate)).toEqual(['2020-11-18', '2020-11-18', '2020-11-18']);
+    expect([pst, ist, utc].map((ms) => epochToDate(ms))).toEqual(['2020-11-18', '2020-11-18', '2020-11-18']);
   });
 
   it('passes through values that are not timestamps', () => {
     expect(epochToDate('soon')).toBe('soon');
+  });
+
+  it('uses the reader\'s time zone when the instant is local midnight there, which fixes zones east of UTC+12', () => {
+    const kiritimati = Date.UTC(2021, 0, 1, 0, 0, 0) - 14 * 3_600_000; // 2021-01-01 00:00 at UTC+14
+    const auckland = Date.UTC(2021, 0, 1, 0, 0, 0) - 13 * 3_600_000; // 2021-01-01 00:00 at UTC+13 (NZ summer)
+    expect(epochToDate(kiritimati, 'Pacific/Kiritimati')).toBe('2021-01-01');
+    expect(epochToDate(auckland, 'Pacific/Auckland')).toBe('2021-01-01');
+    // From a zone that does not match the author's, the nearest-UTC-day rule applies (documented limit).
+    expect(epochToDate(Date.UTC(2021, 0, 1, 8, 0, 0), 'Asia/Kolkata')).toBe('2021-01-01');
+    expect(epochToDate(Date.UTC(2021, 0, 1, 8, 0, 0), 'not/a-zone')).toBe('2021-01-01');
+  });
+
+  it('reads tracker dates in the configured time zone', () => {
+    const payload = { columns: [{ content: 'D', type: 'DATE', id: '0' }], rows: [{ '0': Date.UTC(2021, 0, 1) - 13 * 3_600_000 }] };
+    expect(md(app(TRACKER, payload), { timeZone: 'Pacific/Auckland' })).toContain('| 2021-01-01 |');
   });
 });
 
@@ -140,6 +155,13 @@ describe('process bar and other apps', () => {
     expect(r).toContain('**Salesforce record**');
     expect(r).toContain('Live Salesforce data is not exported');
     expect(r).toContain('`0013h00000C9tHJAAZ`');
+  });
+
+  it('keeps every table in an unknown app, for example one per sheet', () => {
+    const dump = `<details><summary>Sheets</summary><table><tr><th>First</th></tr><tr><td>a</td></tr></table><table><tr><th>Second</th></tr><tr><td>b</td></tr></table></details>`;
+    const out = md(app('zzzUnknown9', undefined, dump));
+    expect(out).toContain('| First |');
+    expect(out).toContain('| Second |');
   });
 
   it('keeps unknown apps as a generic table and records a warning for follow-up', () => {

@@ -1,4 +1,5 @@
 import { relativeLink } from './links';
+import { linkDest } from './markdownUtils';
 
 export interface RewriteContext {
   /** Root-relative path of the note being written. */
@@ -9,7 +10,9 @@ export interface RewriteContext {
   docPath: (idOrSecret: string) => string | undefined;
   /** True when the id belongs to a person: Quip uses the same URL shape for @mentions and documents. */
   isUser?: (id: string) => boolean;
-  /** Site used for links to documents outside this export. */
+  /** The link as it appeared in the document, used when the target is outside this export. */
+  originalUrl?: (idOrSecret: string) => string | undefined;
+  /** Site used to rebuild a link when the original is unknown. */
   siteUrl: string;
 }
 
@@ -37,7 +40,7 @@ export function rewriteSentinels(markdown: string, ctx: RewriteContext): Rewrite
     if (path) return `[${label}](${relativeLink(ctx.from, path)})`;
     if (ctx.isUser?.(target)) return label;
     unresolvedDocs.add(target);
-    return `[${label}](${ctx.siteUrl.replace(/\/+$/, '')}/${target})`;
+    return `[${label}](${linkDest(ctx.originalUrl?.(target) ?? `${ctx.siteUrl.replace(/\/+$/, '')}/${target}`)})`;
   });
   return { markdown: out, unresolvedDocs: [...unresolvedDocs], missingBlobs: [...missingBlobs] };
 }

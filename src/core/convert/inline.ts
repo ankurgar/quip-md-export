@@ -56,9 +56,11 @@ function renderLink(cx: Cx, a: Element, mode: InlineMode): string {
     const dest = cx.blob(url.threadId, url.blobId, 'file', hint);
     return label ? `[${label}](${dest})` : `[attachment](${dest})`;
   }
-  const dest = url.kind === 'doc' ? cx.doc(url.id) : linkDest(url.url);
+  const dest = url.kind === 'doc' ? cx.doc(url.id, href ?? undefined) : linkDest(url.url);
   if (!label) {
-    return url.kind === 'external' ? `<${url.url}>` : `[${url.id}](${dest})`;
+    if (url.kind !== 'external') return `[${url.id}](${dest})`;
+    // A bare <autolink> cannot hold whitespace or angle brackets, so anything unusual becomes a normal link.
+    return /^[^\s<>]+$/.test(url.url) ? `<${url.url}>` : `[${escapeInline(url.url)}](${dest})`;
   }
   // Text that is just the URL reads better as an autolink.
   if (url.kind === 'external' && /^https?:\/\//i.test(url.url) && !/[\s<>]/.test(url.url) && (a.textContent ?? '').trim() === url.url) {
@@ -92,6 +94,13 @@ export function renderInlineNode(cx: Cx, node: Node, mode: InlineMode): string {
     case 'input':
     case 'button':
       return '';
+    case 'control': {
+      // Quip wraps attachments, dates and mentions in <control>. One that renders to nothing is flagged, never silently dropped.
+      const inner = renderInline(cx, el, mode);
+      if (inner.trim() !== '') return inner;
+      cx.warn('empty-control', el.getAttribute('data-remapped') ?? el.getAttribute('id') ?? '');
+      return '<!-- empty Quip control -->';
+    }
     default:
       break;
   }
