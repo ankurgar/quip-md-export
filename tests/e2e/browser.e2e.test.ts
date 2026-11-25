@@ -276,6 +276,29 @@ describe('the extension in a real Chromium', () => {
     await page.close();
   });
 
+  it('forgets the token on request: from the page and from both kinds of browser storage', async () => {
+    const page = await openExporter();
+    const stored = () =>
+      page.evaluate(async () => ({
+        session: !!((await chrome.storage.session.get('token')) as { token?: string }).token,
+        local: !!((await chrome.storage.local.get('token')) as { token?: string }).token,
+      }));
+    await page.check('#remember');
+    await connect(page);
+    expect(await stored()).toEqual({ session: true, local: true });
+
+    await page.click('#btn-forget');
+    await state(page, 'idle');
+    expect(await stored()).toEqual({ session: false, local: false });
+    expect(await page.inputValue('#token')).toBe('');
+    expect(await page.isChecked('#remember')).toBe(false);
+    expect(await page.isDisabled('#btn-run')).toBe(true);
+    expect(await page.$$('#roots label')).toHaveLength(0);
+    await expect(page.textContent('#roots')).resolves.toContain('Connect first to list your folders.');
+    await expect(page.textContent('#connect-status')).resolves.toContain('The token was removed');
+    await page.close();
+  });
+
   it('writes to the folder chosen last, even when the folder scanned earlier has the same name', async () => {
     const page = await openExporter();
     const hook = (name: string, arg: string) =>

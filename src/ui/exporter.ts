@@ -70,6 +70,7 @@ const ui = {
   token: byId<HTMLInputElement>('token'),
   remember: byId<HTMLInputElement>('remember'),
   connect: byId<HTMLButtonElement>('btn-connect'),
+  forget: byId<HTMLButtonElement>('btn-forget'),
   connectStatus: byId('connect-status'),
   pick: byId<HTMLButtonElement>('btn-pick'),
   regrant: byId<HTMLButtonElement>('btn-regrant'),
@@ -166,6 +167,7 @@ function setPhase(next: Phase): void {
 function refresh(): void {
   const busy = phase === 'loading' || phase === 'connecting' || phase === 'scanning' || phase === 'running';
   ui.connect.disabled = busy;
+  ui.forget.disabled = busy;
   ui.token.disabled = busy;
   ui.pick.disabled = busy;
   ui.regrant.disabled = busy;
@@ -287,6 +289,12 @@ function renderRoots(saved: string[] | null): void {
   legend.textContent = 'Folders';
   ui.roots.append(legend);
   // A selection saved for another account would leave nothing ticked, so it only counts if it matches something here.
+  if ((conn?.roots ?? []).length === 0) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'Connect first to list your folders.';
+    ui.roots.append(hint);
+  }
   const known = new Set((conn?.roots ?? []).map((r) => r.id));
   const usable = saved?.some((id) => known.has(id)) ? saved : null;
   for (const root of conn?.roots ?? []) {
@@ -480,6 +488,25 @@ function makeSession(signal: AbortSignal): ReturnType<typeof createSession> {
 
 const scopeKey = (): string => JSON.stringify([buildOptions(), epoch]);
 
+/** Wipes the token from the page and from both kinds of browser storage, and disconnects. */
+async function forgetToken(): Promise<void> {
+  await exclusive(async () => {
+    await chrome.storage.session.remove('token');
+    await chrome.storage.local.remove('token');
+    ui.token.value = '';
+    ui.remember.checked = false;
+    conn = undefined;
+    session = undefined;
+    epoch += 1;
+    pageTarget = undefined;
+    renderRoots(null);
+    renderPageScope();
+    ui.scanSummary.hidden = true;
+    setStatus(ui.connectStatus, 'The token was removed from this page and from the browser. Paste a token to connect again.');
+    setPhase('idle');
+  });
+}
+
 /** A rejected token disconnects, so nothing else is attempted until a working one is entered. */
 function rejectToken(): void {
   conn = undefined;
@@ -651,6 +678,7 @@ async function init(): Promise<void> {
   if (__E2E__ && E2E) (await import('./e2eHooks')).installTestHooks(() => target, useTarget);
 
   ui.connect.addEventListener('click', () => void connect());
+  ui.forget.addEventListener('click', () => void forgetToken());
   ui.token.addEventListener('keydown', (e) => e.key === 'Enter' && void connect());
   ui.pick.addEventListener('click', () => void pickTarget());
   ui.regrant.addEventListener('click', () => void regrantTarget());
