@@ -78,6 +78,12 @@ export class PathAllocator {
     return this.byKey.get(key);
   }
 
+  /** Re-registers a previously allocated path (used when resuming from saved state). */
+  restore(key: string, path: string): void {
+    this.byKey.set(key, path);
+    this.used.add(path.toLowerCase());
+  }
+
   snapshot(): Record<string, string> {
     return Object.fromEntries(this.byKey);
   }
