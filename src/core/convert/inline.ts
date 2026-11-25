@@ -60,6 +60,10 @@ function renderLink(cx: Cx, a: Element, mode: InlineMode): string {
   if (!label) {
     return url.kind === 'external' ? `<${url.url}>` : `[${url.id}](${dest})`;
   }
+  // Text that is just the URL reads better as an autolink.
+  if (url.kind === 'external' && /^https?:\/\//i.test(url.url) && !/[\s<>]/.test(url.url) && (a.textContent ?? '').trim() === url.url) {
+    return `<${url.url}>`;
+  }
   return `[${label}](${dest})`;
 }
 

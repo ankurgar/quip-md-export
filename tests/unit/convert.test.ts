@@ -73,6 +73,16 @@ describe('links, images and attachments', () => {
     expect(r.markdown).toContain('![](quip-blob:T1abcdefghi/Btwo)');
   });
 
+  it('recognises attachment links of the form quip.com/-/blob/<thread>/<blob>?name=…', () => {
+    const r = convert(`<p><control data-remapped="true"><a href="https://quip.com/-/blob/NATTACHthr1/SyntheticBlobId0000001?name=Shortcut.lnk">Shortcut.lnk</a></control></p>`);
+    expect(r.blobs).toEqual([{ threadId: 'NATTACHthr1', blobId: 'SyntheticBlobId0000001', kind: 'file', hint: 'Shortcut.lnk' }]);
+    expect(r.markdown.trim()).toBe('[Shortcut.lnk](quip-blob:NATTACHthr1/SyntheticBlobId0000001)');
+  });
+
+  it('writes a link whose text is its own URL as an autolink', () => {
+    expect(md('<p><a href="https://swagger.io">https://swagger.io</a> and <a href="https://a.example/x">the site</a></p>')).toBe('<https://swagger.io> and [the site](https://a.example/x)');
+  });
+
   it('treats blob links as file attachments and external images as plain links', () => {
     const r = convert(`<p><a href="/blob/T1abcdefghi/Bpdf">report.pdf</a> <img src="https://cdn.example.com/x.png" alt="x"></p>`);
     expect(r.blobs).toEqual([{ threadId: 'T1abcdefghi', blobId: 'Bpdf', kind: 'file', hint: 'report.pdf' }]);
@@ -149,6 +159,17 @@ describe('tables and spreadsheets', () => {
   it('drops the letter row but keeps the first column when it is not a row-number column', () => {
     const html = `<table><thead><tr><th></th><th>A</th></tr></thead><tbody><tr><td>x</td><td>1</td></tr></tbody></table>`;
     expect(md(html)).toBe('| x | 1 |\n| --- | --- |');
+  });
+
+  it("removes the <br> Quip puts at the end of every cell and drops a letters-only header row (real export shape)", () => {
+    const cell = (text: string) => `<td id='s:R_C'><span id='s:R_C'>${text}</span>\n\n<br/></td>`;
+    const html = `<div data-section-style='13'><table title='Sheet1'><thead><tr><th class='empty'>A<br/></th><th class='empty'>B<br/></th></tr></thead><tbody>
+      <tr>${cell('Shortcut')}${cell('Action')}</tr><tr>${cell('Ctrl + Q')}${cell('open preview')}</tr><tr>${cell('')}${cell('')}</tr></tbody></table></div>`;
+    expect(md(html)).toBe('| Shortcut | Action |\n| --- | --- |\n| Ctrl + Q | open preview |');
+  });
+
+  it('keeps a header row of letters in an ordinary table that is not a Quip spreadsheet', () => {
+    expect(md('<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>')).toBe('| A | B |\n| --- | --- |\n| 1 | 2 |');
   });
 
   it('names embedded sheets unless they carry the default name', () => {

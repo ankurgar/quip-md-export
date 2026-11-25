@@ -33,7 +33,7 @@ export function classifyUrl(raw: string | null | undefined): UrlKind {
 
   const isQuip = host === '' || QUIP_HOST.test(host);
   if (isQuip) {
-    const blob = /^\/(?:1\/)?blob\/([\w-]+)\/([\w-]+)/.exec(path);
+    const blob = /^\/(?:1\/|-\/)?blob\/([\w-]+)\/([\w-]+)/.exec(path);
     if (blob?.[1] && blob[2]) return { kind: 'blob', threadId: blob[1], blobId: blob[2] };
     const doc = /^\/([A-Za-z0-9]{11,12})(?:\/|$)/.exec(path);
     if (doc?.[1] && looksLikeThreadId(doc[1])) return { kind: 'doc', id: doc[1] };

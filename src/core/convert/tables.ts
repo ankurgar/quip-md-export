@@ -67,7 +67,8 @@ export function renderCell(cx: Cx, cell: Element): string {
   }
   flush();
 
-  let text = segments.join('<br>');
+  // Quip ends every spreadsheet cell with a <br>; it is not content.
+  let text = segments.join('<br>').replace(/^(?:\s*<br>)+\s*|(?:\s*<br>)+\s*$/g, '');
   const cls = cell.classList;
   if (text.trim()) {
     if (cls.contains('strikethrough')) text = wrapMarks('~~', text);
@@ -153,10 +154,11 @@ function trimEmptyEdges(rows: string[][]): string[][] {
 }
 
 /**
- * Quip renders spreadsheets with a header row of column letters and a first column of row
- * numbers. Those are UI chrome, not data, so they are dropped when they match exactly.
+ * Quip renders spreadsheets with a header row of column letters, sometimes with a first column of
+ * row numbers. Those are UI chrome, not data. A letters-only header (no row-number column) is
+ * dropped only when `lettersOnly` is set, i.e. for tables known to be spreadsheets.
  */
-export function normalizeSpreadsheetGrid(rows: string[][]): string[][] {
+export function normalizeSpreadsheetGrid(rows: string[][], lettersOnly = false): string[][] {
   let out = rows;
   const first = out[0];
   if (first && first.length >= 2 && first[0]?.trim() === '' && first.slice(1).every((v, i) => v.trim() === columnLabel(i))) {
@@ -164,6 +166,8 @@ export function normalizeSpreadsheetGrid(rows: string[][]): string[][] {
     const nums = out.map((r) => r[0]?.trim() ?? '');
     const sequential = nums.length > 0 && nums.every((v, i) => /^\d+$/.test(v) && (i === 0 || Number(v) > Number(nums[i - 1])));
     if (sequential) out = out.map((r) => r.slice(1));
+  } else if (lettersOnly && first && first.length >= 1 && first.every((v, i) => v.trim() === columnLabel(i))) {
+    out = out.slice(1);
   }
   return trimEmptyEdges(out);
 }
@@ -189,13 +193,13 @@ export function gridToMarkdown(grid: Grid): string {
 }
 
 export interface TableOptions {
-  /** Strip Quip's spreadsheet chrome (letter header row, row-number column). On by default: the pattern is exact. */
+  /** true: the table is a Quip spreadsheet, so strip all of its chrome. false: keep every row. Default: strip only the unmistakable pattern. */
   spreadsheet?: boolean;
 }
 
 export function renderTable(cx: Cx, table: Element, opts: TableOptions = {}): string {
   const grid = tableToGrid(cx, table);
-  grid.rows = opts.spreadsheet === false ? trimEmptyEdges(grid.rows) : normalizeSpreadsheetGrid(grid.rows);
+  grid.rows = opts.spreadsheet === false ? trimEmptyEdges(grid.rows) : normalizeSpreadsheetGrid(grid.rows, opts.spreadsheet === true);
   return gridToMarkdown(grid);
 }
 
