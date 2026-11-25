@@ -30,6 +30,15 @@ export class NodeFsSink implements Sink {
     }
   }
 
+  async readBytes(path: string): Promise<Uint8Array | undefined> {
+    try {
+      return new Uint8Array(await readFile(this.abs(path)));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw err;
+    }
+  }
+
   async readHead(path: string, maxBytes: number): Promise<string | undefined> {
     let handle;
     try {

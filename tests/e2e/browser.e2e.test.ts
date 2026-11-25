@@ -100,6 +100,8 @@ describe('the extension in a real Chromium', () => {
     await page.click('#btn-scan');
     await state(page, 'scanned');
     await expect(page.textContent('#scan-summary')).resolves.toContain('9 documents in 5 folders');
+    // A folder that cannot be read leaves unfiled documents uncertain, and the user hears about it before anything is written.
+    await expect(page.textContent('#scan-summary')).resolves.toContain('1 folder could not be read, so documents you wrote inside it may also be exported under "_Unfiled"');
 
     await page.click('#btn-run');
     await state(page, 'done');
@@ -412,5 +414,42 @@ describe('the extension in a real Chromium', () => {
       await page.close();
       await slow.close();
     }
+  });
+
+  it('honours a Stop that arrives before the export has even started', async () => {
+    const page = await openExporter();
+    await connect(page);
+    // Both clicks in one task: Stop lands while the export is still asking for its lock.
+    await page.evaluate(() => {
+      (document.getElementById('btn-run') as HTMLButtonElement).click();
+      (document.getElementById('btn-stop') as HTMLButtonElement).click();
+    });
+    await state(page, 'stopped');
+    await expect(page.textContent('#run-status')).resolves.toContain('Stopped');
+    expect(Object.keys(await readTree(page)).filter((p) => p.endsWith('.md'))).toEqual([]);
+    await page.close();
+  });
+
+  it('does not let a tab that scanned earlier overwrite what another tab has exported since', async () => {
+    const first = await openExporter({ target: 'e2e-shared' });
+    const second = await openExporter({ target: 'e2e-shared', reuse: '1' });
+    await connect(first);
+    await first.click('#btn-scan');
+    await state(first, 'scanned');
+
+    await connect(second);
+    await second.click('#btn-run');
+    await state(second, 'done');
+    await expect(second.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved, 0 unchanged of 9 documents/);
+
+    // The first tab's scan is now out of date: it plans again, sees what the second tab saved, and finds nothing to redo.
+    await first.click('#btn-run');
+    await state(first, 'done');
+    await expect(first.textContent('#run-status')).resolves.toMatch(/Done\. 0 saved, 9 unchanged of 9 documents/);
+    const tree = await readTree(first);
+    expect(Object.keys(tree).filter((p) => p.endsWith('.md') && !p.startsWith('_Quip'))).toHaveLength(9);
+    expect(Object.keys(tree).some((p) => /\(\d+\)\.md$/.test(p))).toBe(true); // the two same-titled notes, and nothing duplicated beyond them
+    expect(Object.keys(tree).filter((p) => /Notes \(3\)|Project Plan \(2\)/.test(p))).toEqual([]);
+    await Promise.all([first.close(), second.close()]);
   });
 });

@@ -3,9 +3,10 @@
  * It deliberately sends a write request to prove the browser-level guard blocks it.
  */
 /** An empty folder in the origin-private file system, standing in for the folder picker in tests. */
-export async function freshTestTarget(name = 'e2e-target'): Promise<FileSystemDirectoryHandle> {
+export async function freshTestTarget(name = 'e2e-target', reuse = false): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory();
-  await root.removeEntry(name, { recursive: true }).catch(() => undefined);
+  // Reusing the folder lets a second page share a target with the first, as two tabs on one real folder would.
+  if (!reuse) await root.removeEntry(name, { recursive: true }).catch(() => undefined);
   return root.getDirectoryHandle(name, { create: true });
 }
 

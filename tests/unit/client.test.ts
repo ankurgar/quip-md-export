@@ -228,17 +228,12 @@ describe('downloads', () => {
     expect(file.contentType).toBe('image/png');
   });
 
-  it('refuses an error object that arrives with a 200 instead of saving it as the file', async () => {
-    const { c } = client(() => json({ error: 'application_error', error_code: 404, error_description: 'No such blob' }));
-    const err = await c.getXlsx('ABCDEFGHIJK').catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(QuipHttpError);
-    expect(String((err as Error).message)).toContain('error instead of the file');
-  });
-
-  it('still saves a genuine JSON attachment', async () => {
-    const { c } = client(() => json({ rows: [1, 2, 3], error: 'none' }));
+  it('hands over whatever bytes arrive, even when they look like an error report, and leaves the judging to the caller', async () => {
+    const report = { error: 'application_error', error_code: 404, error_description: 'No such blob' };
+    const { c } = client(() => json(report));
     const file = await c.getBlob('ABCDEFGHIJK', 'blobBLOB001');
-    expect(JSON.parse(new TextDecoder().decode(file.bytes))).toEqual({ rows: [1, 2, 3], error: 'none' });
+    expect(JSON.parse(new TextDecoder().decode(file.bytes))).toEqual(report);
+    expect(file.contentType).toContain('json');
   });
 });
 

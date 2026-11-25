@@ -74,6 +74,11 @@ export class FsaSink implements Sink {
     return (await this.file(path))?.text();
   }
 
+  async readBytes(path: string): Promise<Uint8Array | undefined> {
+    const file = await this.file(path);
+    return file ? new Uint8Array(await file.arrayBuffer()) : undefined;
+  }
+
   async readHead(path: string, maxBytes: number): Promise<string | undefined> {
     return (await this.file(path))?.slice(0, maxBytes).text();
   }

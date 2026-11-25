@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { frontMatter, relativeLink, relativePath, usecToIso } from '../../src/core/links';
+import { digest, digestText } from '../../src/core/digest';
+import { frontMatter, frontMatterHasId, relativeLink, relativePath, usecToIso } from '../../src/core/links';
 import { codeSpan, encodePathSegment, escapeInline, fencedBlock, linkDest } from '../../src/core/markdownUtils';
 import { PathAllocator, sanitizeName } from '../../src/core/naming';
 
@@ -138,6 +139,34 @@ describe('frontMatter and timestamps', () => {
   it('converts microsecond timestamps to ISO strings', () => {
     expect(usecToIso(1_605_686_400_000_000)).toBe('2020-11-18T08:00:00.000Z');
     expect(usecToIso(undefined)).toBeUndefined();
+  });
+});
+
+describe('recognising the tool\'s own notes', () => {
+  const note = frontMatter({ title: 'Plan', quip_id: 'PLANthread1', quip_type: 'document' });
+
+  it('accepts front matter that names the document, with either line ending', () => {
+    expect(frontMatterHasId(`${note}\n\n# Plan`, 'PLANthread1')).toBe(true);
+    expect(frontMatterHasId(`${note}\n\n# Plan`.replace(/\n/g, '\r\n'), 'PLANthread1')).toBe(true);
+    expect(frontMatterHasId(note.slice(0, note.indexOf('quip_type')), 'PLANthread1')).toBe(true); // a head that stops before the closing line
+  });
+
+  it('rejects another document, a missing block, and an id that only appears further down', () => {
+    expect(frontMatterHasId(note, 'OTHERthrd001')).toBe(false);
+    expect(frontMatterHasId('# My own note\n\nquip_id: "PLANthread1"\n', 'PLANthread1')).toBe(false);
+    expect(frontMatterHasId('---\ntitle: Mine\n---\n\n```\nquip_id: "PLANthread1"\n```\n', 'PLANthread1')).toBe(false);
+    expect(frontMatterHasId('Intro\n\n---\nquip_id: "PLANthread1"\n---\n', 'PLANthread1')).toBe(false);
+  });
+});
+
+describe('digest', () => {
+  it('is stable, and changes with any edit or a different length', () => {
+    const bytes = new TextEncoder().encode('# Note\n\nbody');
+    expect(digest(bytes)).toBe(digest(Uint8Array.from(bytes)));
+    expect(digestText('# Note\n\nbody')).toBe(digest(bytes));
+    expect(digestText('# Note\n\nbodY')).not.toBe(digestText('# Note\n\nbody'));
+    expect(digestText('abc')).not.toBe(digestText('abcd'));
+    expect(digestText('')).toMatch(/^0:/);
   });
 });
 

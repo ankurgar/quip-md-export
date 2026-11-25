@@ -1,5 +1,6 @@
 import { htmlToMarkdown, type HtmlParser } from './convert';
-import { frontMatter, relativeLink, usecToIso } from './links';
+import { digest, digestText } from './digest';
+import { frontMatter, frontMatterHasId, relativeLink, usecToIso } from './links';
 import { escapeBlockStart, escapeInline } from './markdownUtils';
 import { PathAllocator } from './naming';
 import { AuthError, QuipHttpError } from './quipClient';
@@ -151,6 +152,8 @@ export interface ExportSummary {
   failures: Failure[];
   unresolvedLinks: string[];
   unreadableFolders: Plan['unreadableFolders'];
+  /** Folders outside the selection that could not be read; documents inside them can show up as unfiled. */
+  unreadableUnselected: Plan['unreadableUnselected'];
   unreadableThreads: Plan['unreadableThreads'];
   skippedChats: number;
   othersUnfiled: number;
@@ -174,8 +177,8 @@ interface ThreadState {
   retry?: boolean;
   /** Attachments and sidecars the note links to; the note is only up to date while all of them still exist. */
   files?: string[];
-  /** The raw archive for this document was written. */
-  raw?: boolean;
+  /** The raw archive files written for this document; they must still exist for the document to be skipped while the archive is on. */
+  rawFiles?: string[];
   /** The time zone dates were read in, kept only for documents whose content depends on it. */
   timeZone?: string;
 }
@@ -185,6 +188,8 @@ interface ExportState {
   paths: Record<string, string>;
   /** The names `paths` were allocated for, so a title such as "Report (2)" is not mistaken for a collision suffix. */
   names?: Record<string, string>;
+  /** What each note, .xlsx and PDF looked like when this tool wrote it, so one that was edited or replaced since is left alone. */
+  digests?: Record<string, string>;
   threads: Record<string, ThreadState>;
 }
 
@@ -215,6 +220,16 @@ const errMessage = (err: unknown): string => (err instanceof Error ? err.message
  */
 const isRetryable = (err: unknown): boolean => !(err instanceof QuipHttpError) || err.status === 0 || err.status >= 500 || err.status === 429;
 const hasZipSignature = (b: Uint8Array): boolean => b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+/** A small JSON object with the fields Quip uses for an error report. */
+function looksLikeApiError(contentType: string, bytes: Uint8Array): boolean {
+  if (!/json/i.test(contentType) || bytes.length >= 4096) return false;
+  try {
+    const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    return typeof body === 'object' && body !== null && 'error' in body && ('error_code' in body || 'error_description' in body);
+  } catch {
+    return false;
+  }
+}
 /** The PDF specification lets "%PDF" sit anywhere in the first 1024 bytes. */
 const hasPdfSignature = (b: Uint8Array): boolean => {
   const end = Math.min(b.length, 1024) - 3;
@@ -227,8 +242,10 @@ const isOwnReport = (text: string): boolean => text.startsWith('# Quip export re
 export class Exporter {
   private readonly opts: ExportOptions;
   private readonly alloc = new PathAllocator();
-  private state: ExportState = { version: 2, paths: {}, threads: {} };
+  private state: ExportState = { version: 2, paths: {}, threads: {}, digests: {} };
   private stateLoaded = false;
+  /** The saved state exactly as it was read, to notice when another run has changed it since. */
+  private loadedStateText: string | undefined;
   private plan: Plan | undefined;
   private docIndex = new Map<string, PlannedThread>();
   private readonly users = new Map<string, string>();
@@ -287,11 +304,12 @@ export class Exporter {
     if (this.stateLoaded) return;
     this.stateLoaded = true;
     const text = await this.deps.sink.readText(STATE_PATH);
+    this.loadedStateText = text;
     if (text) {
       try {
         const parsed = JSON.parse(text) as Partial<ExportState>;
         if (parsed.version === 2 && parsed.paths && parsed.threads) {
-          this.state = { version: 2, paths: parsed.paths, threads: parsed.threads };
+          this.state = { version: 2, paths: parsed.paths, threads: parsed.threads, digests: parsed.digests ?? {} };
           for (const [key, path] of Object.entries(parsed.paths)) this.alloc.restore(key, path, parsed.names?.[key]);
         } else this.log('warn', 'Ignoring export state from another version; every document will be checked again.');
       } catch {
@@ -308,18 +326,48 @@ export class Exporter {
     await this.deps.sink.writeFile(STATE_PATH, JSON.stringify({ ...this.state, paths: this.alloc.snapshot(), names: this.alloc.names() }, null, 1));
   }
 
-  /** A path is free for a note if nothing is there, or the file there is this document's own earlier export. */
+  /**
+   * Whether a note is this document's own, judged by the front matter at the top of the file. Used when planning,
+   * where a note the user has edited must stay mapped to its name.
+   */
   private ownsNote(id: string): (path: string) => Promise<boolean> {
     return async (path) => {
       const head = await this.deps.sink.readHead(path, 4000);
-      if (head === undefined) return true;
-      return new RegExp(`^quip_id:\\s*"${id}"\\s*$`, 'm').test(head);
+      return head === undefined || frontMatterHasId(head, id);
     };
   }
 
+  /**
+   * Whether this tool may write a note at `path`: nothing is there, or the file is exactly what the tool wrote
+   * (an edited one is the user's now), or, with no record of what it wrote, it carries this document's front matter.
+   */
+  private mayReplaceNote(id: string): (path: string) => Promise<boolean> {
+    return async (path) => {
+      const recorded = this.state.digests?.[path];
+      if (recorded === undefined) return this.ownsNote(id)(path);
+      const bytes = await this.deps.sink.readBytes(path);
+      return bytes === undefined || digest(bytes) === recorded;
+    };
+  }
+
+  /** A saved .xlsx or PDF may be replaced only while it is exactly what this tool wrote. */
+  private readonly mayReplaceBinary = async (path: string): Promise<boolean> => {
+    const bytes = await this.deps.sink.readBytes(path);
+    return bytes === undefined || this.state.digests?.[path] === digest(bytes);
+  };
+
+  private async writeRecorded(path: string, data: string | Uint8Array): Promise<void> {
+    await this.deps.sink.writeFile(path, data);
+    (this.state.digests ??= {})[path] = typeof data === 'string' ? digestText(data) : digest(data);
+  }
+
+  /** False when another run has changed the saved state since this exporter read it: its scan is out of date. */
+  async isStateCurrent(): Promise<boolean> {
+    await this.loadState();
+    return (await this.deps.sink.readText(STATE_PATH)) === this.loadedStateText;
+  }
+
   private readonly isMissing = async (path: string): Promise<boolean> => !(await this.deps.sink.exists(path));
-  /** A file this tool wrote earlier may be written again; the saved state is what says it wrote it. */
-  private readonly always = (): Promise<boolean> => Promise.resolve(true);
 
   // ---- discovery -------------------------------------------------------
 
@@ -464,8 +512,8 @@ export class Exporter {
     const relocated: Relocation[] = [];
     for (const t of limited) {
       const title = t.meta.title.trim() || 'Untitled';
-      t.path = await this.alloc.allocateFree(`thread:${t.meta.id}`, t.folderPath, title, '.md', this.ownsNote(t.meta.id));
-      if (t.meta.type === 'slides') t.pdfPath = await this.alloc.allocateFree(`pdf:${t.meta.id}`, t.folderPath, title, '.pdf', this.isMissing, this.always);
+      t.path = await this.alloc.allocateFree(`thread:${t.meta.id}`, t.folderPath, title, '.md', this.mayReplaceNote(t.meta.id), this.ownsNote(t.meta.id));
+      if (t.meta.type === 'slides') t.pdfPath = await this.alloc.allocateFree(`pdf:${t.meta.id}`, t.folderPath, title, '.pdf', this.isMissing, this.mayReplaceBinary);
       const before = this.state.threads[t.meta.id]?.path;
       if (before && before !== t.path) relocated.push({ id: t.meta.id, title, from: before, to: t.path });
       const folder = folderByPath.get(t.folderPath);
@@ -567,6 +615,7 @@ export class Exporter {
       failures: this.failures,
       unresolvedLinks: [...this.unresolved],
       unreadableFolders: plan.unreadableFolders,
+      unreadableUnselected: plan.unreadableUnselected,
       unreadableThreads: plan.unreadableThreads,
       skippedChats: plan.skippedChats,
       othersUnfiled: plan.othersUnfiled,
@@ -610,12 +659,15 @@ export class Exporter {
     if (!this.opts.skipUnchanged || !prev || prev.retry) return false;
     if (t.meta.updatedUsec === undefined || prev.updatedUsec !== t.meta.updatedUsec) return false;
     if (prev.fingerprint !== this.fingerprint() || prev.path !== t.path) return false;
-    if (this.opts.keepRaw && !prev.raw) return false;
+    if (this.opts.keepRaw && !prev.rawFiles) return false;
     if (prev.timeZone !== undefined && prev.timeZone !== this.opts.timeZone) return false;
     for (const [key, target] of Object.entries(prev.links ?? {})) if (this.findDoc(key)?.path !== target) return false;
     for (const key of prev.unresolved ?? []) if (this.findDoc(key)) return false;
     for (const file of prev.files ?? []) if (!(await this.deps.sink.exists(file))) return false;
-    return this.deps.sink.exists(t.path);
+    if (this.opts.keepRaw) for (const file of prev.rawFiles ?? []) if (!(await this.deps.sink.exists(file))) return false;
+    // Still this document's note: the file may have been replaced since the scan.
+    const head = await this.deps.sink.readHead(t.path, 4000);
+    return head !== undefined && frontMatterHasId(head, t.meta.id);
   }
 
   private async exportThread(t: PlannedThread): Promise<DocResult> {
@@ -640,6 +692,12 @@ export class Exporter {
     const embeds: Record<string, number> = {};
     const flags: Flags = { retry: false, files: new Set() };
     const linkLog: LinkLog = { links: {}, unresolved: new Set() };
+    const rawFiles: string[] = [];
+    const writeRaw = async (name: string, data: string): Promise<void> => {
+      const path = `${RAW_DIR}/${meta.id}/${name}`;
+      await sink.writeFile(path, data);
+      rawFiles.push(path);
+    };
     let body: string;
     let xlsxLine = '';
 
@@ -647,7 +705,7 @@ export class Exporter {
       body = await this.slidesBody(t, warnings, flags);
     } else {
       const rawHtml = await this.stage('fetch', () => client.getThreadHtml(meta.id));
-      if (this.opts.keepRaw) await sink.writeFile(`${RAW_DIR}/${meta.id}/body.html`, rawHtml);
+      if (this.opts.keepRaw) await writeRaw('body.html', rawHtml);
       if (rawHtml.trim() === '') warnings.push({ code: 'empty-html', detail: 'Quip returned no content (often a permissions issue)' });
       body = await this.stage('convert', () => this.convert(t, rawHtml, warnings, embeds, flags, linkLog));
       xlsxLine = await this.saveSpreadsheet(t, embeds, warnings, flags);
@@ -663,10 +721,10 @@ export class Exporter {
     }
 
     await this.claimNotePath(t);
-    await sink.writeFile(t.path, this.composeNote(t, body, xlsxLine, comments, embeds));
+    await this.writeRecorded(t.path, this.composeNote(t, body, xlsxLine, comments, embeds));
     if (this.opts.keepRaw) {
-      await sink.writeFile(`${RAW_DIR}/${meta.id}/thread.json`, JSON.stringify({ meta: t.raw, normalized: meta }, null, 1));
-      if (this.opts.includeComments && meta.type !== 'slides') await sink.writeFile(`${RAW_DIR}/${meta.id}/messages.json`, JSON.stringify(messages, null, 1));
+      await writeRaw('thread.json', JSON.stringify({ meta: t.raw, normalized: meta }, null, 1));
+      if (this.opts.includeComments && meta.type !== 'slides') await writeRaw('messages.json', JSON.stringify(messages, null, 1));
     }
 
     for (const key of linkLog.unresolved) this.unresolved.add(key);
@@ -682,7 +740,7 @@ export class Exporter {
       warnings: warnings.slice(0, MAX_STORED_WARNINGS),
       embeds,
       files: [...flags.files],
-      ...(this.opts.keepRaw ? { raw: true } : {}),
+      ...(this.opts.keepRaw ? { rawFiles } : {}),
       ...(embeds.project_tracker && this.opts.timeZone ? { timeZone: this.opts.timeZone } : {}),
       ...(flags.retry ? { retry: true } : {}),
     };
@@ -690,16 +748,17 @@ export class Exporter {
   }
 
   /**
-   * Just before a note is written, checks again that nothing this tool did not write sits at its path
-   * (the folder may have changed since the scan, or another run may be writing). If something does,
-   * the note moves to a free name instead of replacing it.
+   * Just before a note is written, checks once more that the file at its path is still what this tool wrote
+   * (the folder may have changed since the scan, the user may have edited the note since the last export, or
+   * another run may be writing). If not, the file is left alone and the note moves to a free name.
    */
   private async claimNotePath(t: PlannedThread): Promise<void> {
-    const owns = this.ownsNote(t.meta.id);
-    if (await owns(t.path)) return;
+    const may = this.mayReplaceNote(t.meta.id);
+    if (await may(t.path)) return;
     const title = t.meta.title.trim() || 'Untitled';
-    const moved = await this.alloc.allocateFree(`thread:${t.meta.id}`, t.folderPath, title, '.md', owns);
-    this.log('warn', `A file that is not this tool's note appeared at ${t.path}; "${title}" was saved as ${moved} instead.`);
+    const moved = await this.alloc.allocateFree(`thread:${t.meta.id}`, t.folderPath, title, '.md', may, may);
+    this.log('warn', `${t.path} was edited or replaced since this tool wrote it, so it was left alone and "${title}" was saved as ${moved}.`);
+    this.plan?.relocated.push({ id: t.meta.id, title, from: t.path, to: moved });
     t.path = moved;
   }
 
@@ -760,7 +819,7 @@ export class Exporter {
       try {
         const pdf = await this.deps.client.getSlidesPdf(t.meta.id);
         if (!hasPdfSignature(pdf.bytes)) throw new Error('Quip did not return a PDF');
-        await this.deps.sink.writeFile(t.pdfPath, pdf.bytes);
+        await this.writeRecorded(t.pdfPath, pdf.bytes);
         flags.files.add(t.pdfPath);
         pdfLink = `[Open the PDF copy](${relativeLink(t.path, t.pdfPath)})`;
       } catch (err) {
@@ -780,10 +839,10 @@ export class Exporter {
     if (meta.type !== 'spreadsheet' && !meta.hasSpreadsheet && (embeds.spreadsheet ?? 0) === 0) return '';
     const title = meta.title.trim() || 'Untitled';
     try {
-      const path = await this.alloc.allocateFree(`xlsx:${meta.id}`, t.folderPath, title, '.xlsx', this.isMissing, this.always);
+      const path = await this.alloc.allocateFree(`xlsx:${meta.id}`, t.folderPath, title, '.xlsx', this.isMissing, this.mayReplaceBinary);
       const file = await this.deps.client.getXlsx(meta.id);
       if (!hasZipSignature(file.bytes)) throw new Error('Quip did not return a workbook');
-      await this.deps.sink.writeFile(path, file.bytes);
+      await this.writeRecorded(path, file.bytes);
       flags.files.add(path);
       return `> Original spreadsheet with its formulas: [${escapeInline(`${title}.xlsx`)}](${relativeLink(t.path, path)})`;
     } catch (err) {
@@ -841,6 +900,8 @@ export class Exporter {
     try {
       const res = await this.deps.client.getBlob(ref.threadId, ref.blobId);
       if (res.bytes.length === 0) throw new Error('empty response');
+      // Never dropped (it may be a genuine JSON file), but flagged: Quip's error reports have this shape too.
+      if (looksLikeApiError(res.contentType, res.bytes)) warnings.push({ code: 'attachment-suspect', detail: `${key}: the file is JSON shaped like a Quip error report` });
       const ext = attachmentExtension(res.contentType, ref.hint, res.bytes);
       const stem = ref.kind === 'file' && ref.hint ? stripExtension(ref.hint) : ref.blobId;
       const path = known ?? (await this.alloc.allocateFree(allocKey, `${this.attachmentsRoot}/${ref.threadId}`, stem, ext, this.isMissing));

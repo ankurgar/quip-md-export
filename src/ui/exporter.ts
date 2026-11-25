@@ -109,6 +109,8 @@ let session: ReturnType<typeof createSession> | undefined;
 let sessionKey = '';
 /** Bumped whenever the account or target folder changes, so a cached scan can never be reused for the wrong place. */
 let epoch = 0;
+/** Set by Stop, so a stop that arrives before an export has created its own controller is not lost. */
+let stopRequested = false;
 /** Only one of connect, scan and export may run at a time. */
 let working = false;
 let pendingFrom: string | undefined;
@@ -249,7 +251,7 @@ async function pickTarget(): Promise<void> {
 
 async function restoreTarget(): Promise<void> {
   if (__E2E__ && E2E) {
-    await useTarget(await (await import('./e2eHooks')).freshTestTarget(params.get('target') ?? undefined));
+    await useTarget(await (await import('./e2eHooks')).freshTestTarget(params.get('target') ?? undefined, params.get('reuse') === '1'));
     return;
   }
   const handle = await idbGet<FileSystemDirectoryHandle>('target').catch(() => undefined);
@@ -509,6 +511,11 @@ function showPlan(plan: Plan): void {
   if (plan.relocated.length > 0) lines.push(`${plan.relocated.length} documents get a new file name or folder (moved or renamed in Quip, or the old file name is taken); the old copy stays.`);
   const unreadable = plan.unreadableFolders.length + plan.unreadableThreads.length;
   if (unreadable > 0) lines.push(`${unreadable} items could not be read with this token and will be listed in the report.`);
+  // What is inside a folder that cannot be read is unknown, so the user decides before anything is written.
+  const unknownFolders = plan.unreadableFolders.length + plan.unreadableUnselected.length;
+  if (unknownFolders > 0 && ui.unfiled.checked) {
+    lines.push(`${unknownFolders} folder${unknownFolders === 1 ? '' : 's'} could not be read, so documents you wrote inside ${unknownFolders === 1 ? 'it' : 'them'} may also be exported under "_Unfiled". Untick "Include documents you wrote that are in no folder" and scan again to leave them out.`);
+  }
   lines.push('', `About ${plan.estimatedRequests} Quip API requests, roughly ${duration(estimateMs(plan.estimatedRequests))} at Quip's rate limits (50 a minute, 750 an hour).`);
   ui.scanSummary.textContent = lines.join('\n');
   ui.scanSummary.hidden = false;
@@ -562,15 +569,19 @@ const RUN_LOCK = 'quip-md-export-run';
 async function runExport(): Promise<Phase> {
   let release: () => Promise<void> = async () => undefined;
   try {
+    // Another tab may have exported since this one scanned: its saved state and plan are then out of date.
+    if (session && !(await session.exporter.isStateCurrent())) session = undefined;
     if (!session || !controller || controller.signal.aborted || sessionKey !== scopeKey()) {
       controller = new AbortController();
       session = makeSession(controller.signal);
       sessionKey = scopeKey();
     }
+    if (stopRequested) {
+      setStatus(ui.runStatus, 'Stopped before anything was written.', 'warn');
+      return 'stopped';
+    }
     const active = session;
     await saveSettings();
-    ui.log.replaceChildren();
-    ui.progress.value = 0;
     release = await acquireWakeLock();
     const summary = await active.exporter.run();
     if (summary.aborted) {
@@ -596,7 +607,11 @@ async function run(): Promise<void> {
   if (!conn || !target) return;
   await exclusive(async () => {
     const before = phase;
+    stopRequested = false;
     // At once, so the click is visibly taken and nothing else can start while the lock is being asked for.
+    // The log is cleared here, not later, so a message that arrives meanwhile is not wiped out.
+    ui.log.replaceChildren();
+    ui.progress.value = 0;
     setPhase('running');
     setStatus(ui.runStatus, 'Starting…');
     let final: Phase = before;
@@ -639,7 +654,10 @@ async function init(): Promise<void> {
   ui.regrant.addEventListener('click', () => void regrantTarget());
   ui.scan.addEventListener('click', () => void scan());
   ui.run.addEventListener('click', () => void run());
-  ui.stop.addEventListener('click', () => controller?.abort());
+  ui.stop.addEventListener('click', () => {
+    stopRequested = true;
+    controller?.abort();
+  });
   for (const el of [ui.scopeAll, ui.scopePage]) el.addEventListener('change', refresh);
   ui.remember.addEventListener('change', () => {
     // Unticking must take effect now, not at the next connect.

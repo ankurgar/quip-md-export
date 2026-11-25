@@ -406,7 +406,7 @@ describe('never overwriting, checked again on every run', () => {
     expect(summary.docs).toMatchObject({ exported: 9, failed: 0 });
     expect(await read('Private/Notes.md')).toBe('APPEARED AFTER THE SCAN');
     expect(await read('Private/Notes (3).md')).toContain('quip_id: "NOTESthrdA1"');
-    expect(events.some((e) => e.type === 'log' && e.level === 'warn' && /appeared/.test(e.message))).toBe(true);
+    expect(events.some((e) => e.type === 'log' && e.level === 'warn' && /edited or replaced/.test(e.message))).toBe(true);
     expect((await runAll()).docs).toMatchObject({ exported: 0, skipped: 9 });
   });
 
@@ -489,6 +489,7 @@ describe('documents in no folder', () => {
   it('lists folders outside the selection that could not be read, because their documents may then look unfiled', async () => {
     const summary = await runAll({ rootIds: [F_PRIV], allRootIds: [F_PRIV, F_LOCKED] });
     expect(summary.docs.failed).toBe(0);
+    expect(summary.unreadableUnselected).toEqual([{ id: F_LOCKED, status: 403 }]);
     const report = await read('_Quip export report.md');
     expect(report).toContain('- Folder `fLOCKED0001`, outside your selection (HTTP 403)');
     expect(report).toContain('a document you wrote there can appear under the unfiled directory');
@@ -518,7 +519,7 @@ describe('downloads that are not what they claim to be', () => {
   it('treats an error object delivered with a 200 as a failure', async () => {
     const bad = await setup({ override: (req) => (req.path === `/1/threads/${T_RENTAL}/export/xlsx` ? { status: 200, body: { error: 'application_error', error_code: 404, error_description: 'No such file' } } : undefined) });
     const summary = await runAll({}, bad);
-    expect(summary.warnings['xlsx-failed']?.examples.join(' ')).toContain('HTTP 200');
+    expect(summary.warnings['xlsx-failed']?.examples.join(' ')).toContain('did not return a workbook');
     expect(await visible(bad)).not.toContain('Private/Rental Records.xlsx');
   });
 });
@@ -543,6 +544,136 @@ describe('dates that depend on the time zone', () => {
     expect(moved.docs).toMatchObject({ exported: 1, skipped: 8 });
     expect(moved.warnings['ambiguous-date']).toBeUndefined();
     expect(await read('Private/Projects/Project Plan.md')).toContain('2020-11-18');
+  });
+});
+
+describe('what the user changed is the user\'s', () => {
+  const bump = (id: string): void => {
+    const doc = ctx.mock.fixture.threads[id];
+    if (doc) doc.updated += 1_000_000;
+  };
+
+  it('keeps a note the user edited when the document changes in Quip, and writes the new version beside it', async () => {
+    await runAll();
+    const original = await read('Private/Notes.md');
+    await writeFile(join(ctx.dir, 'Private/Notes.md'), `${original}\n\nMY OWN ADDITION`);
+    bump('NOTESthrdA1');
+
+    const again = await runAll();
+    expect(again.docs.exported).toBe(1);
+    expect(await read('Private/Notes.md')).toContain('MY OWN ADDITION');
+    expect(await read('Private/Notes (3).md')).toContain('quip_id: "NOTESthrdA1"');
+    expect(again.relocated).toContainEqual({ id: 'NOTESthrdA1', title: 'Notes', from: 'Private/Notes.md', to: 'Private/Notes (3).md' });
+    expect(await read('_Quip export report.md')).toContain('`Private/Notes.md` is now `Private/Notes (3).md`');
+
+    // The new copy is the tool's own from now on: it is updated in place, and the user's file stays as it was.
+    bump('NOTESthrdA1');
+    const third = await runAll();
+    expect(third.docs.exported).toBe(1);
+    expect((await notes()).filter((n) => n.startsWith('Private/Notes'))).toEqual(['Private/Notes (3).md', 'Private/Notes.md']);
+    expect(await read('Private/Notes.md')).toContain('MY OWN ADDITION');
+  });
+
+  it('writes nothing when the user edited a note but Quip did not change the document', async () => {
+    await runAll();
+    const original = await read('Private/Notes.md');
+    await writeFile(join(ctx.dir, 'Private/Notes.md'), `${original}\n\nMY OWN ADDITION`);
+    const again = await runAll();
+    expect(again.docs).toMatchObject({ exported: 0, skipped: 9 });
+    expect((await notes()).filter((n) => n.startsWith('Private/Notes'))).toEqual(['Private/Notes.md']);
+    expect(await read('Private/Notes.md')).toContain('MY OWN ADDITION');
+  });
+
+  it('still updates an untouched note in place when the document changes', async () => {
+    await runAll();
+    bump('NOTESthrdA1');
+    const doc = ctx.mock.fixture.threads.NOTESthrdA1;
+    if (doc) doc.pages = ["<h1>Notes</h1><p class='line'>first, revised</p>"];
+    await runAll();
+    expect(await read('Private/Notes.md')).toContain('first, revised');
+    expect((await notes()).filter((n) => n.startsWith('Private/Notes'))).toEqual(['Private/Notes.md']);
+  });
+
+  it('does not take a personal note for its own just because it quotes a quip_id', async () => {
+    await mkdir(join(ctx.dir, 'Private'), { recursive: true });
+    const mine = '# How exports look\n\n```\nquip_id: "NOTESthrdA1"\n```\n';
+    await writeFile(join(ctx.dir, 'Private/Notes.md'), mine);
+    await runAll();
+    expect(await read('Private/Notes.md')).toBe(mine);
+    expect(await read('Private/Notes (2).md')).toContain('quip_id: "NOTESthrdA1"');
+  });
+
+  it('keeps a spreadsheet copy the user edited or replaced, and writes the new one beside it', async () => {
+    await runAll();
+    await writeFile(join(ctx.dir, 'Private/Rental Records.xlsx'), 'MY OWN EDITED WORKBOOK');
+    bump(T_RENTAL);
+    const again = await runAll();
+    expect(again.docs.exported).toBe(1);
+    expect(await read('Private/Rental Records.xlsx')).toBe('MY OWN EDITED WORKBOOK');
+    expect(new Uint8Array(await readFile(join(ctx.dir, 'Private/Rental Records (2).xlsx')))).toEqual(XLSX_BYTES);
+    expect(await read('Private/Rental Records.md')).toContain('[Rental Records.xlsx](Rental%20Records%20%282%29.xlsx)');
+
+    bump(T_RENTAL);
+    await runAll();
+    expect(await read('Private/Rental Records.xlsx')).toBe('MY OWN EDITED WORKBOOK');
+    expect((await visible()).filter((p) => p.endsWith('.xlsx') && p.includes('Rental'))).toEqual(['Private/Rental Records (2).xlsx', 'Private/Rental Records.xlsx']);
+  });
+
+  it('keeps a slide deck PDF the user replaced, and writes the new one beside it when the deck changes', async () => {
+    await runAll();
+    await writeFile(join(ctx.dir, 'Private/Projects/Pitch deck.pdf'), 'MY OWN ANNOTATED PDF');
+    expect((await runAll()).docs.exported).toBe(0); // the deck did not change, so nothing is written
+    bump('SLIDESthrd1');
+    const again = await runAll();
+    expect(again.docs.exported).toBe(1);
+    expect(await read('Private/Projects/Pitch deck.pdf')).toBe('MY OWN ANNOTATED PDF');
+    expect(await read('Private/Projects/Pitch deck (2).pdf')).toMatch(/^%PDF/);
+    expect(await read('Private/Projects/Pitch deck.md')).toContain('(Pitch%20deck%20%282%29.pdf)');
+  });
+
+  it('notices a note replaced after the scan, instead of counting it as done', async () => {
+    await runAll();
+    const second = makeSession();
+    await second.exporter.scan();
+    await writeFile(join(ctx.dir, 'Private/Notes.md'), 'REPLACED WHILE THE SECOND RUN WAS PLANNED');
+    const summary = await second.exporter.run();
+    expect(await read('Private/Notes.md')).toBe('REPLACED WHILE THE SECOND RUN WAS PLANNED');
+    expect(await read('Private/Notes (3).md')).toContain('quip_id: "NOTESthrdA1"');
+    expect(summary.docs.exported).toBe(1);
+  });
+});
+
+describe('the raw archive and other tabs', () => {
+  it('restores raw files that were deleted while the archive is on, and leaves them alone when it is off', async () => {
+    await runAll();
+    await rm(join(ctx.dir, '.quip-raw/PLANthread1/body.html'));
+    expect((await runAll({ keepRaw: false })).docs).toMatchObject({ exported: 0, skipped: 9 });
+    expect(await visible()).not.toContain('.quip-raw');
+    const restored = await runAll({ keepRaw: true });
+    expect(restored.docs).toMatchObject({ exported: 1, skipped: 8 });
+    expect(await read('.quip-raw/PLANthread1/body.html')).toContain('data-live-app-id');
+  });
+
+  it('can tell that another run has changed the saved state since it scanned', async () => {
+    const stale = makeSession();
+    await stale.exporter.scan();
+    expect(await stale.exporter.isStateCurrent()).toBe(true);
+    await runAll();
+    expect(await stale.exporter.isStateCurrent()).toBe(false);
+    const fresh = makeSession();
+    await fresh.exporter.scan();
+    expect(await fresh.exporter.isStateCurrent()).toBe(true);
+  });
+});
+
+describe('files Quip sends that look odd', () => {
+  it('keeps a JSON attachment shaped like an error report, and flags it instead of dropping it', async () => {
+    const odd = await setup({ override: (req) => (req.path === `/1/blob/${T_PLAN}/${B_OK}` ? { status: 200, body: { error: 'x', error_code: 1, rows: [1, 2] } } : undefined) });
+    const summary = await runAll({}, odd);
+    expect(summary.warnings['attachment-suspect']).toBeDefined();
+    const saved = (await listTree(odd.dir)).filter((p) => p.startsWith('_attachments/PLANthread1/BLOBok00001'));
+    expect(saved).toHaveLength(1);
+    expect(JSON.parse(await read(saved[0] as string, odd))).toMatchObject({ rows: [1, 2] });
   });
 });
 

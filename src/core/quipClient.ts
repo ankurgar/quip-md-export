@@ -313,25 +313,9 @@ export class QuipClient implements QuipApi {
     }
   }
 
-  /** A download. Quip describes a failure as a JSON error object; one that arrives with a 200 must not be saved as the file. */
   private async getBytes(path: string, query: Query = {}): Promise<BinaryResponse> {
     const res = await this.send(path, query, '*/*', 'follow');
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    const contentType = res.headers.get('content-type') ?? '';
-    const asError = /json/i.test(contentType) && bytes.length < 4096 ? this.errorObject(bytes) : undefined;
-    if (asError !== undefined) throw new QuipHttpError(res.status, path, `Quip answered with an error instead of the file: ${this.redact(asError)}`);
-    return { bytes, contentType };
-  }
-
-  private errorObject(bytes: Uint8Array): string | undefined {
-    const text = new TextDecoder().decode(bytes);
-    let body: unknown;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return undefined;
-    }
-    return isObj(body) && 'error' in body && ('error_code' in body || 'error_description' in body) ? text : undefined;
+    return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: res.headers.get('content-type') ?? '' };
   }
 
   // ---- bulk helper -----------------------------------------------------
