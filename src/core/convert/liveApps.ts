@@ -1,6 +1,6 @@
 import { escapeBlockStart, escapeInline, fencedBlock } from '../markdownUtils';
 import type { Cx } from './context';
-import { renderInline } from './inline';
+import { joinBlocks, renderBlocks, type Block } from './blocks';
 import { gridToMarkdown, renderCell, renderTable, tableToGrid } from './tables';
 
 export type LiveAppType =
@@ -103,13 +103,16 @@ function localParts(ms: number, timeZone: string): { year: string; month: string
  * is the date. Otherwise the nearest UTC midnight recovers the day for authors between UTC-12 and
  * UTC+11:59; authors further east, read from a different zone, can still be one day off.
  */
-export function epochToDate(value: unknown, timeZone = 'UTC'): string {
+export function epochToDate(value: unknown, timeZone = 'UTC', onGuess?: (date: string) => void): string {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return cellText(value);
   const local = localParts(n, timeZone);
   if (local && local.time === '00:00:00') return `${local.year}-${local.month}-${local.day}`;
   const day = 86_400_000;
-  return new Date(Math.round(n / day) * day).toISOString().slice(0, 10);
+  const date = new Date(Math.round(n / day) * day).toISOString().slice(0, 10);
+  // Neither the reader's midnight nor UTC midnight: the day is the nearest guess, which the caller can flag.
+  if (n % day !== 0) onGuess?.(date);
+  return date;
 }
 
 function monthLabel(displayMonth: unknown): string | undefined {
@@ -217,7 +220,7 @@ function trackerFromPayload(cx: Cx, payload: Json): string {
             return cellText(opt?.label ?? value);
           }
           case 'DATE':
-            return epochToDate(value, zone);
+            return epochToDate(value, zone, (date) => cx.warn('ambiguous-date', `${date} from timestamp ${String(value)}`));
           case 'FILE':
             return asArray(value)
               .map((v) => (isObj(v) ? cellText(v.name ?? v.id ?? '') : cellText(v)))
@@ -240,19 +243,19 @@ function processBar(cx: Cx, el: Element): string | undefined {
   return steps.map((s) => (s.current ? `**${s.text}** (current)` : s.text)).join(' → ');
 }
 
+/** Quip's own rendering of an app, kept whole and in order: tables, paragraphs, lists and code alike. */
+function dumpMarkdown(cx: Cx, el: Element): string {
+  const container = Array.from(el.children).find((c) => c.tagName.toLowerCase() === 'details') ?? el;
+  const copy = container.cloneNode(true) as Element;
+  for (const child of Array.from(copy.children)) if (child.tagName.toLowerCase() === 'summary') child.remove();
+  const blocks: Block[] = [];
+  renderBlocks(cx, copy, blocks);
+  return joinBlocks(blocks).trim();
+}
+
 function genericDump(cx: Cx, el: Element, payload: Json | undefined, max: number): string | undefined {
-  // Quip's own rendering may hold several tables (for example one per sheet); keep all of them.
-  const tables = Array.from(el.querySelectorAll('table')).filter((t) => !t.parentElement?.closest('table'));
-  const rendered = tables.map((t) => renderTable(cx, t)).filter((md) => md !== '');
-  if (rendered.length > 0) return truncate(rendered.join('\n\n'), cx, max, 'tables');
-  const pre = el.querySelector('pre');
-  const preText = (pre?.textContent ?? '').trim();
-  if (preText) return truncate(fencedBlock(preText), cx, max, 'pre');
-  const text = Array.from(el.querySelectorAll('details'))
-    .map((d) => renderInline(cx, d, { br: 'hard' }).trim())
-    .filter(Boolean)
-    .join('\n\n');
-  if (text) return truncate(text, cx, max, 'text');
+  const dump = dumpMarkdown(cx, el);
+  if (dump) return truncate(dump, cx, max, 'dump');
   if (payload) return truncate(fencedBlock(JSON.stringify(payload, null, 2), 'json'), cx, max, 'payload');
   return undefined;
 }

@@ -1,5 +1,5 @@
 import { isObj, normalizeCurrentUser, normalizeFolder, normalizeMessage, normalizeThread, normalizeThreadType } from './normalize';
-import type { BinaryResponse, CurrentUser, OwnedThread, QuipApi, QuipMessage, Result } from './quipTypes';
+import type { BinaryResponse, CurrentUser, MessageList, OwnedThread, QuipApi, QuipMessage, Result } from './quipTypes';
 import type { FolderMeta, ThreadMeta } from './types';
 
 export const DEFAULT_BASE_URL = 'https://platform.quip.com';
@@ -84,6 +84,7 @@ const BLOB_ID_RE = /^[\w-]{8,64}$/;
 const MAX_WAIT_MS = 3_600_000;
 const MAX_THROTTLE_WAITS = 30;
 /** [remaining header, reset header] for each rate-limit pool Quip documents. */
+const RETRY_AFTER_HEADERS = ['retry-after', 'x-company-retry-after', 'x-documentbulkexport-retry-after'];
 const RATE_POOLS: ReadonlyArray<readonly [string, string]> = [
   ['x-ratelimit-remaining', 'x-ratelimit-reset'],
   ['x-company-ratelimit-remaining', 'x-company-ratelimit-reset'],
@@ -128,6 +129,15 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
+}
+
+/** Seconds from a Retry-After style header, which holds either a number of seconds or an HTTP date. */
+function retryAfterSeconds(headers: Headers, name: string, now: number): number | undefined {
+  const raw = headers.get(name)?.trim();
+  if (!raw) return undefined;
+  if (Number.isFinite(Number(raw))) return Math.max(0, Number(raw));
+  const date = Date.parse(raw);
+  return Number.isFinite(date) ? Math.max(0, (date - now) / 1000) : undefined;
 }
 
 function headerNumber(headers: Headers, names: string[]): number | undefined {
@@ -276,8 +286,12 @@ export class QuipClient implements QuipApi {
    */
   private throttleDelay(headers: Headers): number | undefined {
     const now = this.now();
-    const retryAfter = headerNumber(headers, ['retry-after', 'x-company-retry-after', 'x-documentbulkexport-retry-after']);
-    let wait: number | undefined = retryAfter !== undefined ? retryAfter * 1000 : undefined;
+    // Several pools can push back at once; the request may only go ahead when all of them allow it.
+    let wait: number | undefined;
+    for (const name of RETRY_AFTER_HEADERS) {
+      const seconds = retryAfterSeconds(headers, name, now);
+      if (seconds !== undefined) wait = Math.max(wait ?? 0, seconds * 1000);
+    }
     for (const [remainingHeader, resetHeader] of RATE_POOLS) {
       const remaining = headerNumber(headers, [remainingHeader]);
       if (remaining === undefined || remaining > 0) continue;
@@ -299,9 +313,25 @@ export class QuipClient implements QuipApi {
     }
   }
 
+  /** A download. Quip describes a failure as a JSON error object; one that arrives with a 200 must not be saved as the file. */
   private async getBytes(path: string, query: Query = {}): Promise<BinaryResponse> {
     const res = await this.send(path, query, '*/*', 'follow');
-    return { bytes: new Uint8Array(await res.arrayBuffer()), contentType: res.headers.get('content-type') ?? '' };
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const contentType = res.headers.get('content-type') ?? '';
+    const asError = /json/i.test(contentType) && bytes.length < 4096 ? this.errorObject(bytes) : undefined;
+    if (asError !== undefined) throw new QuipHttpError(res.status, path, `Quip answered with an error instead of the file: ${this.redact(asError)}`);
+    return { bytes, contentType };
+  }
+
+  private errorObject(bytes: Uint8Array): string | undefined {
+    const text = new TextDecoder().decode(bytes);
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return undefined;
+    }
+    return isObj(body) && 'error' in body && ('error_code' in body || 'error_description' in body) ? text : undefined;
   }
 
   // ---- bulk helper -----------------------------------------------------
@@ -408,9 +438,10 @@ export class QuipClient implements QuipApi {
   }
 
   /** Comments and conversation for a document, oldest first. */
-  async getMessages(id: string): Promise<QuipMessage[]> {
+  async getMessages(id: string): Promise<MessageList> {
     const path = `/1/messages/${requireId(id)}`;
     const byId = new Map<string, QuipMessage>();
+    let incomplete = false;
     let maxCreated: number | undefined;
     for (let page = 0; page < 1000; page += 1) {
       const body = await this.getJson(path, { count: this.pageSize, ...(maxCreated !== undefined ? { max_created_usec: maxCreated } : {}) });
@@ -429,9 +460,10 @@ export class QuipClient implements QuipApi {
       if (list.length < this.pageSize || !Number.isFinite(oldest)) break;
       // Inclusive cursor: messages sharing the boundary timestamp may straddle two pages, and ids de-duplicate.
       // If a whole page was already seen, more messages share one timestamp than fit in a page, so step past it.
+      if (added === 0) incomplete = true;
       maxCreated = added === 0 ? oldest - 1 : oldest;
     }
-    return [...byId.values()].sort((a, b) => a.createdUsec - b.createdUsec);
+    return { messages: [...byId.values()].sort((a, b) => a.createdUsec - b.createdUsec), incomplete };
   }
 
   async getBlob(threadId: string, blobId: string): Promise<BinaryResponse> {

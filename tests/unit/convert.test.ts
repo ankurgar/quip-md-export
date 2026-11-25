@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { htmlToMarkdown } from '../../src/core/convert';
+import { rewriteSentinels } from '../../src/core/rewrite';
 import type { ConvertOptions } from '../../src/core/types';
 
 const convert = (html: string, extra: Partial<ConvertOptions> = {}) => htmlToMarkdown(html, { threadId: 'T1abcdefghi', ...extra });
@@ -114,6 +115,32 @@ describe('links, images and attachments', () => {
     const r = convert(`<p><img src="${big}"></p>`);
     expect(r.markdown).toBe('');
     expect(r.warnings.map((w) => w.code)).toContain('inline-data-image-skipped');
+  });
+});
+
+describe('several links to one document', () => {
+  const id = 'AbCdEfGhIjKl';
+  const SITE = 'https://acme.quip.com';
+
+  it('gives each distinct address its own placeholder, so none is replaced by the first one seen', () => {
+    const r = htmlToMarkdown(`<p><a href="${SITE}/${id}/Doc#sec1">one</a> <a href="${SITE}/${id}/Doc#sec2">two</a> <a href="${SITE}/${id}/Doc#sec1">again</a></p>`, { threadId: 'T1abcdefghi' });
+    expect(r.markdown.trim()).toBe(`[one](quip-doc:${id}) [two](quip-doc:${id}~1) [again](quip-doc:${id})`);
+    expect(r.docUrls).toEqual({ [id]: `${SITE}/${id}/Doc#sec1`, [`${id}~1`]: `${SITE}/${id}/Doc#sec2` });
+    expect(r.docLinks).toEqual([id]);
+  });
+
+  it('writes each original address back when the document is outside the export, and a relative one in full', () => {
+    const r = htmlToMarkdown(`<p><a href="${SITE}/${id}/Doc#sec1">one</a> <a href="${SITE}/${id}/Doc#sec2">two</a> <a href="/${id}/Doc#sec3">three</a></p>`, { threadId: 'T1abcdefghi' });
+    const out = rewriteSentinels(r.markdown, { from: 'Note.md', blobPath: () => undefined, docPath: () => undefined, originalUrl: (key) => r.docUrls[key], siteUrl: SITE });
+    expect(out.markdown.trim()).toBe(`[one](${SITE}/${id}/Doc#sec1) [two](${SITE}/${id}/Doc#sec2) [three](${SITE}/${id}/Doc#sec3)`);
+    expect(out.unresolvedDocs).toEqual([id]);
+  });
+
+  it('points every variant at the exported note when the document is inside the export', () => {
+    const r = htmlToMarkdown(`<p><a href="${SITE}/${id}/Doc#sec1">one</a> <a href="${SITE}/${id}/Doc#sec2">two</a></p>`, { threadId: 'T1abcdefghi' });
+    const out = rewriteSentinels(r.markdown, { from: 'A/Note.md', blobPath: () => undefined, docPath: (key) => (key === id ? 'B/Doc.md' : undefined), siteUrl: SITE });
+    expect(out.markdown.trim()).toBe('[one](../B/Doc.md) [two](../B/Doc.md)');
+    expect(out.unresolvedDocs).toEqual([]);
   });
 });
 

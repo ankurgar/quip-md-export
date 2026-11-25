@@ -43,6 +43,16 @@ export interface OwnedThread {
   isDeleted: boolean;
 }
 
+/** A document's comments, oldest first. */
+export interface MessageList {
+  messages: QuipMessage[];
+  /**
+   * A whole page of messages shared one timestamp. Quip cannot page past such a run, so if the run was longer
+   * than a page, the rest are missing. Not expected in practice (timestamps have microsecond resolution).
+   */
+  incomplete: boolean;
+}
+
 /** The read-only surface of Quip the exporter depends on. */
 export interface QuipApi {
   currentUser(): Promise<CurrentUser>;
@@ -51,7 +61,7 @@ export interface QuipApi {
   getFolders(ids: string[]): Promise<Map<string, Result<FolderMeta>>>;
   getThreads(ids: string[]): Promise<Map<string, Result<ThreadMeta>>>;
   getThreadHtml(id: string): Promise<string>;
-  getMessages(id: string): Promise<QuipMessage[]>;
+  getMessages(id: string): Promise<MessageList>;
   getBlob(threadId: string, blobId: string): Promise<BinaryResponse>;
   getSlidesPdf(threadId: string): Promise<BinaryResponse>;
   getXlsx(threadId: string): Promise<BinaryResponse>;

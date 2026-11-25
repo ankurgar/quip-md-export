@@ -168,7 +168,7 @@ function refresh(): void {
   ui.regrant.disabled = busy;
   ui.scan.disabled = busy || !conn || !target;
   ui.run.disabled = busy || !conn || !target || !hasScope();
-  ui.stop.disabled = phase !== 'scanning' && phase !== 'running';
+  ui.stop.disabled = phase !== 'connecting' && phase !== 'scanning' && phase !== 'running';
   for (const el of [ui.comments, ui.raw, ui.xlsx, ui.skip, ui.unfiled, ui.max, ui.scopeAll, ui.scopePage]) el.disabled = busy;
   for (const box of ui.roots.querySelectorAll('input')) box.disabled = busy;
 }
@@ -249,7 +249,7 @@ async function pickTarget(): Promise<void> {
 
 async function restoreTarget(): Promise<void> {
   if (__E2E__ && E2E) {
-    await useTarget(await (await import('./e2eHooks')).freshTestTarget());
+    await useTarget(await (await import('./e2eHooks')).freshTestTarget(params.get('target') ?? undefined));
     return;
   }
   const handle = await idbGet<FileSystemDirectoryHandle>('target').catch(() => undefined);
@@ -313,15 +313,33 @@ function renderPageScope(): void {
   }
 }
 
-async function resolvePage(client: QuipClient, url: string): Promise<PageTarget | undefined> {
-  const link = parseQuipUrl(url);
-  if (!link) return undefined;
-  const folder = await client.getFolder(link.id);
-  if (folder.ok) return { kind: 'folder', id: folder.value.id, title: folder.value.title };
-  const thread = await client.getThread(link.id);
-  if (thread.ok && thread.value.type !== 'chat') return { kind: 'document', id: thread.value.id, title: thread.value.title };
-  return undefined;
+interface PageLookup {
+  target?: PageTarget;
+  /** Why the page cannot be offered as the scope; shown to the user instead of silently falling back to all folders. */
+  problem?: string;
 }
+
+async function lookUpPage(client: QuipClient, url: string): Promise<PageLookup> {
+  const link = parseQuipUrl(url);
+  if (!link) return { problem: 'The page you came from is not a Quip document or folder address, so choose the folders to export below.' };
+  try {
+    const folder = await client.getFolder(link.id);
+    if (folder.ok) return { target: { kind: 'folder', id: folder.value.id, title: folder.value.title } };
+    const thread = await client.getThread(link.id);
+    if (thread.ok && thread.value.type !== 'chat') return { target: { kind: 'document', id: thread.value.id, title: thread.value.title } };
+    const why = thread.ok ? 'it is a chat, which cannot be exported' : `this token cannot read it (HTTP ${thread.status || 'no response'})`;
+    return { problem: `The page you came from cannot be offered: ${why}.` };
+  } catch (err) {
+    if (err instanceof AuthError || isAbort(err)) throw err;
+    return { problem: `The page you came from could not be looked up: ${describeError(err)}` };
+  }
+}
+
+const connectedText = (): string => {
+  const user = conn?.user;
+  const site = user?.siteUrl ? ` (${new URL(user.siteUrl).host})` : '';
+  return `Connected as ${user?.name || 'your account'}${site}.`;
+};
 
 async function connect(): Promise<void> {
   await exclusive(async () => {
@@ -330,10 +348,11 @@ async function connect(): Promise<void> {
       setStatus(ui.connectStatus, 'Paste your Quip access token first.', 'warn');
       return;
     }
+    controller = new AbortController();
     setPhase('connecting');
     setStatus(ui.connectStatus, 'Connecting…');
     try {
-      const client = new QuipClient({ token, baseUrl: BASE_URL });
+      const client = new QuipClient({ token, baseUrl: BASE_URL, signal: controller.signal });
       const user = await client.currentUser();
       const choices = rootChoices(user);
       const folders = await client.getFolders(choices.map((c) => c.id));
@@ -344,29 +363,47 @@ async function connect(): Promise<void> {
       conn = { token, user, roots };
       epoch += 1;
       session = undefined;
-      pageTarget = fromUrl ? await resolvePage(client, fromUrl).catch(() => undefined) : undefined;
+      const lookup = fromUrl ? await lookUpPage(client, fromUrl) : {};
+      pageTarget = lookup.target;
       await saveToken(token, ui.remember.checked);
       const settings = await loadSettings();
       renderRoots(settings.roots);
       renderPageScope();
-      const site = user.siteUrl ? ` (${new URL(user.siteUrl).host})` : '';
-      setStatus(ui.connectStatus, `Connected as ${user.name || 'your account'}${site}.`, 'ok');
+      setStatus(ui.connectStatus, lookup.problem ? `${connectedText()} ${lookup.problem}` : connectedText(), lookup.problem ? 'warn' : 'ok');
       setPhase('connected');
     } catch (err) {
       conn = undefined;
-      setStatus(ui.connectStatus, describeError(err), 'error');
+      setStatus(ui.connectStatus, isAbort(err) ? 'Connecting was cancelled.' : describeError(err), isAbort(err) ? 'warn' : 'error');
       setPhase('idle');
     }
   });
 }
 
-/** Points the "only what I was viewing" scope at a Quip page without reconnecting. */
+/** Points the "only what I was viewing" scope at a Quip page without reconnecting. Shows as busy, and can be stopped, while it looks the page up. */
 async function selectPage(url: string): Promise<void> {
   fromUrl = url;
   if (!conn) return;
-  pageTarget = await resolvePage(new QuipClient({ token: conn.token, baseUrl: BASE_URL }), url).catch(() => undefined);
-  renderPageScope();
-  refresh();
+  const { token } = conn;
+  controller = new AbortController();
+  setPhase('connecting');
+  setStatus(ui.connectStatus, 'Looking up the Quip page you selected…');
+  try {
+    const lookup = await lookUpPage(new QuipClient({ token, baseUrl: BASE_URL, signal: controller.signal }), url);
+    pageTarget = lookup.target;
+    renderPageScope();
+    // The scope changed, so a scan shown for the old one no longer applies.
+    ui.scanSummary.hidden = true;
+    setStatus(ui.connectStatus, lookup.problem ? `${connectedText()} ${lookup.problem}` : connectedText(), lookup.problem ? 'warn' : 'ok');
+    setPhase('connected');
+  } catch (err) {
+    if (err instanceof AuthError) {
+      rejectToken();
+      setPhase('idle');
+      return;
+    }
+    setStatus(ui.connectStatus, `${connectedText()} ${isAbort(err) ? 'The page lookup was stopped.' : describeError(err)}`, 'warn');
+    setPhase('connected');
+  }
 }
 
 // ---- scan and export -----------------------------------------------------
@@ -382,7 +419,7 @@ function buildOptions(): Partial<ExportOptions> {
     maxDocs: Number.isFinite(max) && max > 0 ? max : undefined,
     siteUrl: conn?.user.siteUrl,
     ownerId: conn?.user.id,
-    allRootIds: conn?.roots.map((r) => r.id) ?? [],
+    allRootIds: conn?.roots.filter((r) => r.kind !== 'starred').map((r) => r.id) ?? [],
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };
   if (ui.scopePage.checked && pageTarget) {
@@ -469,7 +506,7 @@ function showPlan(plan: Plan): void {
   const lines = [`${plan.threads.length} documents in ${plan.folders.length} folders.`, ...[...perTop].map(([name, n]) => `  ${name}: ${n}`)];
   if (plan.unfiled > 0) lines.push(`${plan.unfiled} documents you wrote sit in no folder; they go under "_Unfiled".`);
   if (plan.othersUnfiled > 0) lines.push(`${plan.othersUnfiled} documents written by other people are in none of your folders and are not exported.`);
-  if (plan.relocated.length > 0) lines.push(`${plan.relocated.length} documents were moved or renamed in Quip since the last export; they get a new file and the old copy stays.`);
+  if (plan.relocated.length > 0) lines.push(`${plan.relocated.length} documents get a new file name or folder (moved or renamed in Quip, or the old file name is taken); the old copy stays.`);
   const unreadable = plan.unreadableFolders.length + plan.unreadableThreads.length;
   if (unreadable > 0) lines.push(`${unreadable} items could not be read with this token and will be listed in the report.`);
   lines.push('', `About ${plan.estimatedRequests} Quip API requests, roughly ${duration(estimateMs(plan.estimatedRequests))} at Quip's rate limits (50 a minute, 750 an hour).`);
@@ -518,42 +555,59 @@ function summarize(s: ExportSummary): string {
   return `${parts.join(', ')} of ${s.docs.planned} documents. The report is ${s.reportPath} in the target folder.`;
 }
 
+/** Held by the one exporter tab that is writing, so two tabs can never pick the same file name for different documents. */
+const RUN_LOCK = 'quip-md-export-run';
+
+/** Runs one export and says which phase to end in. The caller applies it last, once nothing is left to wait for. */
+async function runExport(): Promise<Phase> {
+  let release: () => Promise<void> = async () => undefined;
+  try {
+    if (!session || !controller || controller.signal.aborted || sessionKey !== scopeKey()) {
+      controller = new AbortController();
+      session = makeSession(controller.signal);
+      sessionKey = scopeKey();
+    }
+    const active = session;
+    await saveSettings();
+    ui.log.replaceChildren();
+    ui.progress.value = 0;
+    release = await acquireWakeLock();
+    const summary = await active.exporter.run();
+    if (summary.aborted) {
+      setStatus(ui.runStatus, `Stopped. ${summarize(summary)} Start again to continue where it left off.`, 'warn');
+      return 'stopped';
+    }
+    ui.progress.value = ui.progress.max;
+    setStatus(ui.runStatus, `Done. ${summarize(summary)}`, summary.docs.failed > 0 ? 'warn' : 'ok');
+    return 'done';
+  } catch (err) {
+    if (err instanceof AuthError) rejectToken();
+    const message = err instanceof AuthError ? `Stopped: ${TOKEN_REJECTED} Progress so far is saved, and the report lists what was not exported.` : describeError(err);
+    setStatus(ui.runStatus, isAbort(err) ? 'Stopped. Progress is saved.' : message, isAbort(err) ? 'warn' : 'error');
+    log(describeError(err), 'error');
+    return isAbort(err) ? 'stopped' : err instanceof AuthError ? 'idle' : 'error';
+  } finally {
+    session = undefined;
+    await release();
+  }
+}
+
 async function run(): Promise<void> {
   if (!conn || !target) return;
   await exclusive(async () => {
-    let release: () => Promise<void> = async () => undefined;
-    try {
-      if (!session || !controller || controller.signal.aborted || sessionKey !== scopeKey()) {
-        controller = new AbortController();
-        session = makeSession(controller.signal);
-        sessionKey = scopeKey();
-      }
-      const active = session;
-      await saveSettings();
-      ui.log.replaceChildren();
-      ui.progress.value = 0;
-      setPhase('running');
-      setStatus(ui.runStatus, 'Starting…');
-      release = await acquireWakeLock();
-      const summary = await active.exporter.run();
-      if (summary.aborted) {
-        setStatus(ui.runStatus, `Stopped. ${summarize(summary)} Start again to continue where it left off.`, 'warn');
-        setPhase('stopped');
-      } else {
-        ui.progress.value = ui.progress.max;
-        setStatus(ui.runStatus, `Done. ${summarize(summary)}`, summary.docs.failed > 0 ? 'warn' : 'ok');
-        setPhase('done');
-      }
-    } catch (err) {
-      if (err instanceof AuthError) rejectToken();
-      const message = err instanceof AuthError ? `Stopped: ${TOKEN_REJECTED} Progress so far is saved, and the report lists what was not exported.` : describeError(err);
-      setStatus(ui.runStatus, isAbort(err) ? 'Stopped. Progress is saved.' : message, isAbort(err) ? 'warn' : 'error');
-      log(describeError(err), 'error');
-      setPhase(isAbort(err) ? 'stopped' : err instanceof AuthError ? 'idle' : 'error');
-    } finally {
-      session = undefined;
-      await release();
-    }
+    const before = phase;
+    // At once, so the click is visibly taken and nothing else can start while the lock is being asked for.
+    setPhase('running');
+    setStatus(ui.runStatus, 'Starting…');
+    let final: Phase = before;
+    const started = await navigator.locks.request(RUN_LOCK, { ifAvailable: true }, async (lock) => {
+      if (!lock) return false;
+      final = await runExport();
+      return true;
+    });
+    if (!started) setStatus(ui.runStatus, 'Another exporter tab is already exporting. Wait for it to finish or close it, then start again.', 'warn');
+    // Last, with nothing asynchronous after it: the page never shows "done" while a click would still be ignored.
+    setPhase(final);
   });
 }
 

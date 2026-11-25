@@ -2,9 +2,9 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium, type BrowserContext, type Page } from 'playwright';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createSession } from '../../src/core/session';
-import { F_ARCH, F_DESK, F_PRIV, F_SHARED, F_STAR, F_TRASH, ME, PNG_1X1, SITE, T_PLAN, T_RENTAL_SECRET, TOKEN, XLSX_BYTES } from '../mock/fixture';
+import { F_ARCH, F_DESK, F_PRIV, F_SHARED, F_TRASH, ME, PNG_1X1, SITE, T_PLAN, T_RENTAL_SECRET, TOKEN, XLSX_BYTES } from '../mock/fixture';
 import { probeHtml, startMockQuip, type MockQuip } from '../mock/quipMock';
 import { NodeFsSink, parseHtml } from '../helpers/env';
 
@@ -25,6 +25,11 @@ beforeAll(async () => {
   });
   const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
   extensionId = new URL(worker.url()).host;
+});
+
+// A failed assertion must not leave an exporter page running: it would keep the export lock and write into the next test's folder.
+afterEach(async () => {
+  for (const page of context.pages()) if (page.url().startsWith('chrome-extension://')) await page.close().catch(() => undefined);
 });
 
 afterAll(async () => {
@@ -112,7 +117,7 @@ describe('the extension in a real Chromium', () => {
         // Exactly what the page sends with its default settings.
         options: {
           rootIds: [F_PRIV, F_DESK, F_SHARED, F_ARCH],
-          allRootIds: [F_PRIV, F_DESK, F_SHARED, F_ARCH, F_STAR, F_TRASH],
+          allRootIds: [F_PRIV, F_DESK, F_SHARED, F_ARCH, F_TRASH], // Starred is a view, so the page leaves it out
           ownerId: ME.id,
           timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           siteUrl: SITE,
@@ -226,6 +231,12 @@ describe('the extension in a real Chromium', () => {
         document.body.append(box);
       }, markup);
       await expect.poll(() => probe.probeHits().length, { timeout: 10_000 }).toBeGreaterThan(0);
+      // Let the control page finish loading everything it was asked to, so what comes later is attributable.
+      let seen = -1;
+      for (let i = 0; i < 20 && seen !== probe.probeHits().length; i += 1) {
+        seen = probe.probeHits().length;
+        await plain.waitForTimeout(400);
+      }
       const control = probe.probeHits().length;
 
       // A whole export of documents full of such tags fetches none of them.
@@ -235,6 +246,7 @@ describe('the extension in a real Chromium', () => {
       await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved/);
       await page.waitForTimeout(500);
       expect(probe.probeHits().length).toBe(control);
+      expect(probe.probeHits().filter((r) => r.referer.startsWith('chrome-extension://'))).toEqual([]); // nothing was requested on behalf of the extension page
       expect(probe.mutating()).toEqual([]);
       const tree = await readTree(page);
       const raw = Object.entries(tree).filter(([path]) => path.endsWith('/body.html'));
@@ -311,12 +323,13 @@ describe('the extension in a real Chromium', () => {
       await expect.poll(() => page.textContent('#log'), { timeout: 10_000 }).toContain('Another Quip page was selected');
       expect(await page.getAttribute('body', 'data-state')).toBe('running');
 
-      await state(page, 'done', 120_000);
-      await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved/); // the export that was running was not disturbed
-      await expect.poll(() => page.textContent('#page-label'), { timeout: 15_000 }).toBe('Document: Project Plan');
+      // The export finishes undisturbed; only then is the selected page looked up (the page is busy meanwhile), and the scope follows it.
+      await state(page, 'connected', 120_000);
+      await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved/);
+      await expect(page.textContent('#page-label')).resolves.toBe('Document: Project Plan');
       await expect(page.isChecked('#scope-page')).resolves.toBe(true);
       await expect(page.textContent('#connect-status')).resolves.toContain('Connected as Jane Doe');
-      expect(await page.getAttribute('body', 'data-state')).toBe('done');
+      expect(await page.isDisabled('#btn-run')).toBe(false);
     } finally {
       await page.close();
       await slow.close();
@@ -342,6 +355,62 @@ describe('the extension in a real Chromium', () => {
     } finally {
       await page.close();
       await flaky.close();
+    }
+  });
+
+  it('lets only one exporter tab write at a time', async () => {
+    const slow = await startMockQuip({ delayMs: 60 });
+    const first = await openExporter({ base: slow.url, target: 'e2e-lock-a' });
+    const second = await openExporter({ base: slow.url, target: 'e2e-lock-b' });
+    try {
+      await connect(first);
+      await connect(second);
+      await first.click('#btn-run');
+      await state(first, 'running');
+
+      await second.click('#btn-run');
+      await expect.poll(() => second.textContent('#run-status'), { timeout: 10_000 }).toContain('Another exporter tab is already exporting');
+      expect(await second.getAttribute('body', 'data-state')).toBe('connected'); // still usable, just not running
+      expect(await second.isDisabled('#btn-run')).toBe(false);
+      expect(Object.keys(await readTree(second)).filter((p) => p.endsWith('.md'))).toEqual([]);
+
+      await state(first, 'done', 120_000);
+      await second.click('#btn-run'); // the lock is free again
+      await state(second, 'done', 120_000);
+      await expect(second.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved/);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+      await slow.close();
+    }
+  });
+
+  it('says why the page you came from cannot be offered, instead of silently showing all folders', async () => {
+    const unknown = await openExporter({ from: 'https://acme.quip.com/AbCdEfGhIjKl/Nothing-Here' });
+    await connect(unknown);
+    await expect(unknown.textContent('#connect-status')).resolves.toContain('The page you came from cannot be offered: this token cannot read it (HTTP 404)');
+    expect(await unknown.getAttribute('#connect-status', 'data-tone')).toBe('warn');
+    await expect(unknown.isVisible('#page-scope')).resolves.toBe(false);
+    await expect(unknown.isChecked('#scope-all')).resolves.toBe(true);
+    await unknown.close();
+
+    const notQuip = await openExporter({ from: 'https://example.com/some/page' });
+    await connect(notQuip);
+    await expect(notQuip.textContent('#connect-status')).resolves.toContain('not a Quip document or folder address');
+    await notQuip.close();
+  });
+
+  it('can be stopped while connecting', async () => {
+    const slow = await startMockQuip({ delayMs: 400 });
+    const page = await openExporter({ base: slow.url });
+    try {
+      await page.click('#btn-connect');
+      await state(page, 'connecting');
+      await page.click('#btn-stop');
+      await state(page, 'idle');
+      await expect(page.textContent('#connect-status')).resolves.toContain('Connecting was cancelled');
+    } finally {
+      await page.close();
+      await slow.close();
     }
   });
 });

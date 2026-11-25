@@ -59,7 +59,10 @@ export function basename(path: string): string {
   return i < 0 ? path : path.slice(i + 1);
 }
 
-/** True when `path` is where `allocate` would put this name today (ignoring a " (2)" collision suffix). */
+/**
+ * Whether `path` is where this name would go today, ignoring a " (2)" collision suffix. Only used for
+ * paths restored without the name they were allocated for; otherwise the stored name is compared.
+ */
 function placementMatches(path: string, parentDir: string, base: string, ext: string): boolean {
   if (dirname(path).toLowerCase() !== parentDir.toLowerCase()) return false;
   let name = basename(path);
@@ -76,6 +79,8 @@ function placementMatches(path: string, parentDir: string, base: string, ext: st
 export class PathAllocator {
   private readonly used = new Set<string>();
   private readonly byKey = new Map<string, string>();
+  /** The sanitised name each key asked for, so a literal title such as "Report (2)" is never mistaken for a collision suffix. */
+  private readonly bases = new Map<string, string>();
 
   constructor(seed: Record<string, string> = {}) {
     for (const [key, path] of Object.entries(seed)) this.restore(key, path);
@@ -86,9 +91,10 @@ export class PathAllocator {
   }
 
   /** Re-registers a previously allocated path (used when resuming from saved state). */
-  restore(key: string, path: string): void {
+  restore(key: string, path: string, base?: string): void {
     this.byKey.set(key, path);
     this.used.add(path.toLowerCase());
+    if (base !== undefined) this.bases.set(key, base);
   }
 
   /** Marks a path as taken without binding it to a key (for files the tool itself writes). */
@@ -100,6 +106,19 @@ export class PathAllocator {
     return Object.fromEntries(this.byKey);
   }
 
+  /** The names behind `snapshot()`, to be saved alongside it. */
+  names(): Record<string, string> {
+    return Object.fromEntries(this.bases);
+  }
+
+  private keeps(key: string, existing: string, parentDir: string, base: string, ext: string): boolean {
+    const stored = this.bases.get(key);
+    if (stored === undefined) return placementMatches(existing, parentDir, base, ext);
+    if (dirname(existing).toLowerCase() !== parentDir.toLowerCase()) return false;
+    if (ext && !existing.toLowerCase().endsWith(ext.toLowerCase())) return false;
+    return stored.toLowerCase() === base.toLowerCase();
+  }
+
   private candidate(parentDir: string, base: string, ext: string, n: number): string {
     return joinPath(parentDir, n === 1 ? `${base}${ext}` : `${base} (${n})${ext}`);
   }
@@ -107,30 +126,44 @@ export class PathAllocator {
   allocate(key: string, parentDir: string, desiredName: string, ext = ''): string {
     const base = sanitizeName(desiredName);
     const existing = this.byKey.get(key);
-    if (existing && placementMatches(existing, parentDir, base, ext)) return existing;
+    if (existing && this.keeps(key, existing, parentDir, base, ext)) return existing;
     for (let n = 1; ; n += 1) {
       const candidate = this.candidate(parentDir, base, ext, n);
       if (this.used.has(candidate.toLowerCase())) continue;
       this.used.add(candidate.toLowerCase());
       this.byKey.set(key, candidate);
+      this.bases.set(key, base);
       return candidate;
     }
   }
 
   /**
-   * Like `allocate`, but also skips candidates that `isFree` rejects (a file already in the target
-   * that this tool did not create). A rejected candidate is never reused in this run.
+   * Like `allocate`, but never hands out a path that holds something this tool did not write.
+   * A new path must satisfy `isFree`. A path the key already has is kept only while `canReuse`
+   * (default: `isFree`) still agrees, so a file someone put there since the last run is never
+   * overwritten; the key then moves to a fresh name and the old one stays reserved.
    */
-  async allocateFree(key: string, parentDir: string, desiredName: string, ext: string, isFree: (path: string) => Promise<boolean>): Promise<string> {
+  async allocateFree(
+    key: string,
+    parentDir: string,
+    desiredName: string,
+    ext: string,
+    isFree: (path: string) => Promise<boolean>,
+    canReuse: (path: string) => Promise<boolean> = isFree,
+  ): Promise<string> {
     const base = sanitizeName(desiredName);
     const existing = this.byKey.get(key);
-    if (existing && placementMatches(existing, parentDir, base, ext)) return existing;
+    if (existing && this.keeps(key, existing, parentDir, base, ext) && (await canReuse(existing))) {
+      this.bases.set(key, base);
+      return existing;
+    }
     for (let n = 1; n < 100_000; n += 1) {
       const candidate = this.candidate(parentDir, base, ext, n);
       if (this.used.has(candidate.toLowerCase())) continue;
       this.used.add(candidate.toLowerCase());
       if (!(await isFree(candidate))) continue;
       this.byKey.set(key, candidate);
+      this.bases.set(key, base);
       return candidate;
     }
     throw new Error(`Could not find a free name for ${JSON.stringify(desiredName)} in ${JSON.stringify(parentDir)}`);

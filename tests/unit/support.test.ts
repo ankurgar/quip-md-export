@@ -78,7 +78,41 @@ describe('PathAllocator', () => {
     const free = (p: string): Promise<boolean> => Promise.resolve(!occupied.has(p));
     expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', free)).toBe('Work/Notes (3).md');
     expect(await a.allocateFree('t2', 'Work', 'Notes', '.md', () => Promise.resolve(true))).toBe('Work/Notes (4).md');
-    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', () => Promise.resolve(false))).toBe('Work/Notes (3).md'); // stable, no re-check
+    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', free)).toBe('Work/Notes (3).md'); // still free for its own key
+  });
+
+  it('re-checks a path it already has, so a file put there since the last run is never overwritten', async () => {
+    const a = new PathAllocator();
+    const occupied = new Set<string>();
+    const free = (p: string): Promise<boolean> => Promise.resolve(!occupied.has(p));
+    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', free)).toBe('Work/Notes.md');
+
+    occupied.add('Work/Notes.md'); // someone else's file now sits where this key's note was
+    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', free)).toBe('Work/Notes (2).md');
+    expect(await a.allocateFree('t2', 'Work', 'Notes', '.md', free)).toBe('Work/Notes (3).md'); // the old name stays taken
+    expect(await a.allocateFree('t1', 'Work', 'Notes', '.md', free)).toBe('Work/Notes (2).md'); // and the move is stable
+  });
+
+  it('can be told that a path it wrote itself may be reused even though a file is there', async () => {
+    const a = new PathAllocator();
+    const missing = (): Promise<boolean> => Promise.resolve(true);
+    expect(await a.allocateFree('x1', 'Work', 'Budget', '.xlsx', missing)).toBe('Work/Budget.xlsx');
+    const occupiedByUs = (): Promise<boolean> => Promise.resolve(false);
+    const always = (): Promise<boolean> => Promise.resolve(true);
+    expect(await a.allocateFree('x1', 'Work', 'Budget', '.xlsx', occupiedByUs, always)).toBe('Work/Budget.xlsx');
+  });
+
+  it('does not mistake a literal title such as "Report (2)" for a collision suffix', () => {
+    const a = new PathAllocator();
+    expect(a.allocate('t1', '', 'Report', '.md')).toBe('Report.md');
+    expect(a.allocate('t2', '', 'Report', '.md')).toBe('Report (2).md');
+    // t2 is renamed to what its own file name happens to look like: that is a rename, so it gets its own file.
+    expect(a.allocate('t2', '', 'Report (2)', '.md')).toBe('Report (2) (2).md');
+    // And the other way round, once the name was remembered, a restored allocator agrees.
+    const b = new PathAllocator();
+    for (const [key, path] of Object.entries(a.snapshot())) b.restore(key, path, a.names()[key]);
+    expect(b.allocate('t1', '', 'Report', '.md')).toBe('Report.md');
+    expect(b.allocate('t2', '', 'Report (2)', '.md')).toBe('Report (2) (2).md');
   });
 });
 

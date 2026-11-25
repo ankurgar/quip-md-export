@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { splitSafePath, type Sink } from '../../src/core/sink';
@@ -27,6 +27,23 @@ export class NodeFsSink implements Sink {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw err;
+    }
+  }
+
+  async readHead(path: string, maxBytes: number): Promise<string | undefined> {
+    let handle;
+    try {
+      handle = await open(this.abs(path), 'r');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw err;
+    }
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      await handle.close();
     }
   }
 

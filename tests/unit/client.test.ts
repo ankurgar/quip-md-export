@@ -148,6 +148,22 @@ describe('rate limiting and errors', () => {
     expect(events.filter((e) => e.type === 'throttle')).toEqual([expect.objectContaining({ waitMs: 41_000, reason: 'rate-limit' })]);
   });
 
+  it('waits for the slowest of several pools that push back at once, not the first header it sees', async () => {
+    let n = 0;
+    const { c, clock } = client(() => (++n === 1 ? json({}, 503, { 'retry-after': '1', 'x-company-retry-after': '90' }) : json({ id: 'u1', name: 'Me' })));
+    await c.currentUser();
+    expect(clock.slept).toEqual([91_000]);
+  });
+
+  it('understands a Retry-After given as an HTTP date', async () => {
+    let n = 0;
+    const { c, clock } = client(() => (++n === 1 ? json({}, 429, { 'retry-after': new Date(clock.now() + 20_000).toUTCString() }) : json({ id: 'u1', name: 'Me' })));
+    await c.currentUser();
+    expect(clock.slept).toHaveLength(1);
+    expect(clock.slept[0]).toBeGreaterThanOrEqual(20_000);
+    expect(clock.slept[0]).toBeLessThanOrEqual(22_000);
+  });
+
   it('after a response that spends the quota, delays the next request instead of provoking a 503', async () => {
     const { c, clock, calls } = client(() => json({ id: 'u1', name: 'Me' }, 200, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.ceil(clock.now() / 1000) + 5) }));
     await c.currentUser();
@@ -202,6 +218,30 @@ describe('rate limiting and errors', () => {
   });
 });
 
+describe('downloads', () => {
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+
+  it('returns the bytes and content type of a file', async () => {
+    const { c } = client(() => new Response(bytes, { status: 200, headers: { 'content-type': 'image/png' } }));
+    const file = await c.getBlob('ABCDEFGHIJK', 'blobBLOB001');
+    expect(Array.from(file.bytes)).toEqual(Array.from(bytes));
+    expect(file.contentType).toBe('image/png');
+  });
+
+  it('refuses an error object that arrives with a 200 instead of saving it as the file', async () => {
+    const { c } = client(() => json({ error: 'application_error', error_code: 404, error_description: 'No such blob' }));
+    const err = await c.getXlsx('ABCDEFGHIJK').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(QuipHttpError);
+    expect(String((err as Error).message)).toContain('error instead of the file');
+  });
+
+  it('still saves a genuine JSON attachment', async () => {
+    const { c } = client(() => json({ rows: [1, 2, 3], error: 'none' }));
+    const file = await c.getBlob('ABCDEFGHIJK', 'blobBLOB001');
+    expect(JSON.parse(new TextDecoder().decode(file.bytes))).toEqual({ rows: [1, 2, 3], error: 'none' });
+  });
+});
+
 describe('pagination and bulk helpers', () => {
   it('joins cursor pages of document HTML', async () => {
     const pages: Record<string, unknown> = {
@@ -236,8 +276,9 @@ describe('pagination and bulk helpers', () => {
       const list = all.filter((m) => (max ? m.created_usec <= Number(max) : true)).sort((a, b) => b.created_usec - a.created_usec).slice(0, count);
       return json(list);
     }, { messagePageSize: 2 });
-    const msgs = await c.getMessages('ABCDEFGHIJK');
-    expect(msgs.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+    const { messages, incomplete } = await c.getMessages('ABCDEFGHIJK');
+    expect(messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm4', 'm5']);
+    expect(incomplete).toBe(false);
     expect(calls.length).toBeGreaterThanOrEqual(3);
   });
 
@@ -255,15 +296,16 @@ describe('pagination and bulk helpers', () => {
       const list = all.filter((m) => (max ? m.created_usec <= Number(max) : true)).sort((a, b) => b.created_usec - a.created_usec || b.id.localeCompare(a.id)).slice(0, count);
       return json(list);
     }, { messagePageSize: 3 });
-    const ids = (await c.getMessages('ABCDEFGHIJK')).map((m) => m.id).sort();
-    expect(ids).toEqual(['a', 'b', 'c', 'd', 'e']);
+    const { messages } = await c.getMessages('ABCDEFGHIJK');
+    expect(messages.map((m) => m.id).sort()).toEqual(['a', 'b', 'c', 'd', 'e']);
   });
 
-  it('still terminates when more messages share one timestamp than fit in a page', async () => {
+  it('still terminates when more messages share one timestamp than fit in a page, and says the list is incomplete', async () => {
     const all = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({ id, created_usec: 5000, text: id, author_id: 'u1' }));
     const { c, calls } = client((url) => json(all.filter((m) => (url.searchParams.get('max_created_usec') ? m.created_usec <= Number(url.searchParams.get('max_created_usec')) : true)).slice(0, Number(url.searchParams.get('count')))), { messagePageSize: 2 });
-    const msgs = await c.getMessages('ABCDEFGHIJK');
-    expect(msgs.length).toBeGreaterThanOrEqual(2);
+    const { messages, incomplete } = await c.getMessages('ABCDEFGHIJK');
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    expect(incomplete).toBe(true);
     expect(calls.length).toBeLessThan(10);
   });
 

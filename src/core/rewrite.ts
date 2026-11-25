@@ -1,5 +1,6 @@
 import { relativeLink } from './links';
 import { linkDest } from './markdownUtils';
+import { DOC_VARIANT } from './types';
 
 export interface RewriteContext {
   /** Root-relative path of the note being written. */
@@ -10,8 +11,8 @@ export interface RewriteContext {
   docPath: (idOrSecret: string) => string | undefined;
   /** True when the id belongs to a person: Quip uses the same URL shape for @mentions and documents. */
   isUser?: (id: string) => boolean;
-  /** The link as it appeared in the document, used when the target is outside this export. */
-  originalUrl?: (idOrSecret: string) => string | undefined;
+  /** The link as it appeared in the document (keyed by the placeholder's target), used when the target is outside this export. */
+  originalUrl?: (target: string) => string | undefined;
   /** Site used to rebuild a link when the original is unknown. */
   siteUrl: string;
 }
@@ -23,6 +24,18 @@ export interface RewriteResult {
 }
 
 /** Images and links the converter emitted with `quip-blob:` / `quip-doc:` placeholders. Labels never contain an unescaped `[`. */
+/** A link as written in a document may be relative to the Quip site; a note outside Quip needs the whole address. */
+function absoluteUrl(original: string | undefined, siteUrl: string, id: string): string {
+  const site = siteUrl.replace(/\/+$/, '');
+  if (!original) return `${site}/${id}`;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(original)) return original;
+  try {
+    return new URL(original, `${site}/`).href;
+  } catch {
+    return `${site}/${id}`;
+  }
+}
+
 const SENTINEL = /(!?)\[((?:\\.|[^[\]\\])*)\]\((quip-blob|quip-doc):([^)\s]+)\)/g;
 
 /** Turns converter placeholders into relative links, or visible markers when the target is unavailable. */
@@ -36,11 +49,12 @@ export function rewriteSentinels(markdown: string, ctx: RewriteContext): Rewrite
       missingBlobs.add(target);
       return bang ? `*[missing image${label ? `: ${label}` : ''}]*` : `${label || 'attachment'} *(attachment unavailable)*`;
     }
-    const path = ctx.docPath(target);
+    const id = target.includes(DOC_VARIANT) ? target.slice(0, target.indexOf(DOC_VARIANT)) : target;
+    const path = ctx.docPath(id);
     if (path) return `[${label}](${relativeLink(ctx.from, path)})`;
-    if (ctx.isUser?.(target)) return label;
-    unresolvedDocs.add(target);
-    return `[${label}](${linkDest(ctx.originalUrl?.(target) ?? `${ctx.siteUrl.replace(/\/+$/, '')}/${target}`)})`;
+    if (ctx.isUser?.(id)) return label;
+    unresolvedDocs.add(id);
+    return `[${label}](${linkDest(absoluteUrl(ctx.originalUrl?.(target), ctx.siteUrl, id))})`;
   });
   return { markdown: out, unresolvedDocs: [...unresolvedDocs], missingBlobs: [...missingBlobs] };
 }

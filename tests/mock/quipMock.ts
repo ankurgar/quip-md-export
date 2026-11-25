@@ -7,6 +7,8 @@ export interface RecordedRequest {
   path: string;
   query: Record<string, string>;
   auth: string;
+  /** Where the request came from; sub-resources of an extension page carry a `chrome-extension://` origin. */
+  referer: string;
 }
 
 export interface MockOptions {
@@ -99,7 +101,7 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
 
   const handle = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     const url = new URL(req.url ?? '/', 'http://mock');
-    const rec: RecordedRequest = { method: req.method ?? '', path: url.pathname, query: Object.fromEntries(url.searchParams), auth: req.headers.authorization ?? '' };
+    const rec: RecordedRequest = { method: req.method ?? '', path: url.pathname, query: Object.fromEntries(url.searchParams), auth: req.headers.authorization ?? '', referer: String(req.headers.referer ?? '') };
     requests.push(rec);
     if (rec.method !== 'GET') return error(res, 405, 'method not allowed');
     if (rec.path === '/control.html') {

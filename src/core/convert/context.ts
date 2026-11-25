@@ -1,6 +1,7 @@
 import {
   BLOB_SCHEME,
   DOC_SCHEME,
+  DOC_VARIANT,
   type BlobRef,
   type ConvertOptions,
   type Warning,
@@ -17,6 +18,7 @@ export class Cx {
   /** Ordered-list counters by depth, used to honour "continue numbering". */
   readonly numbering: number[] = [];
 
+  private readonly docVariants = new Map<string, string[]>();
   private readonly blobKeys = new Set<string>();
   private readonly warnKeys = new Set<string>();
 
@@ -45,10 +47,23 @@ export class Cx {
     return `${BLOB_SCHEME}${key}`;
   }
 
+  /**
+   * Registers a link to another document and returns the placeholder the exporter resolves later. Each distinct
+   * address that links to the same document gets its own placeholder, so that when the target is outside the
+   * export every link keeps the address it had (a different section, say) rather than the first one seen.
+   */
   doc(idOrSecretPath: string, href?: string): string {
     this.docLinks.add(idOrSecretPath);
-    if (href && !(idOrSecretPath in this.docUrls)) this.docUrls[idOrSecretPath] = href;
-    return `${DOC_SCHEME}${idOrSecretPath}`;
+    if (!href) return `${DOC_SCHEME}${idOrSecretPath}`;
+    const seen = this.docVariants.get(idOrSecretPath) ?? [];
+    let index = seen.indexOf(href);
+    if (index < 0) {
+      index = seen.push(href) - 1;
+      this.docVariants.set(idOrSecretPath, seen);
+    }
+    const key = index === 0 ? idOrSecretPath : `${idOrSecretPath}${DOC_VARIANT}${index}`;
+    this.docUrls[key] = href;
+    return `${DOC_SCHEME}${key}`;
   }
 
   userName(id: string): string {

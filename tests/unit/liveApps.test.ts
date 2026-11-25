@@ -128,6 +128,23 @@ describe('date handling', () => {
     expect(epochToDate('soon')).toBe('soon');
   });
 
+  it('reports when the day had to be guessed, and only then', () => {
+    const guesses: string[] = [];
+    const guess = (date: string): number => guesses.push(date);
+    epochToDate(Date.UTC(2020, 10, 18, 0, 0, 0), 'UTC', guess); // UTC midnight: certain
+    epochToDate(Date.UTC(2020, 10, 18, 8, 0, 0), 'America/Los_Angeles', guess); // midnight in the reader's zone: certain
+    expect(guesses).toEqual([]);
+    epochToDate(Date.UTC(2020, 10, 18, 8, 0, 0), 'UTC', guess); // neither
+    expect(guesses).toEqual(['2020-11-18']);
+  });
+
+  it('turns a guessed tracker date into a warning on the document', () => {
+    const payload = { columns: [{ content: 'D', type: 'DATE', id: '0' }], rows: [{ '0': Date.UTC(2020, 10, 18, 8, 0, 0) }] };
+    const r = convert(app(TRACKER, payload), { timeZone: 'UTC' });
+    expect(r.warnings.map((w) => w.code)).toContain('ambiguous-date');
+    expect(convert(app(TRACKER, payload), { timeZone: 'America/Los_Angeles' }).warnings.map((w) => w.code)).not.toContain('ambiguous-date');
+  });
+
   it('uses the reader\'s time zone when the instant is local midnight there, which fixes zones east of UTC+12', () => {
     const kiritimati = Date.UTC(2021, 0, 1, 0, 0, 0) - 14 * 3_600_000; // 2021-01-01 00:00 at UTC+14
     const auckland = Date.UTC(2021, 0, 1, 0, 0, 0) - 13 * 3_600_000; // 2021-01-01 00:00 at UTC+13 (NZ summer)
@@ -162,6 +179,18 @@ describe('process bar and other apps', () => {
     const out = md(app('zzzUnknown9', undefined, dump));
     expect(out).toContain('| First |');
     expect(out).toContain('| Second |');
+  });
+
+  it('keeps everything Quip rendered for an unknown app, in order, not only its tables', () => {
+    const dump = `<details><summary>Poll</summary><p>Which day suits you?</p><table><tr><th>Day</th><th>Votes</th></tr><tr><td>Mon</td><td>3</td></tr></table><ul><li>Closes Friday</li></ul><pre>raw: 1</pre></details>`;
+    const out = md(app('zzzUnknown8', undefined, dump));
+    expect(out).toBe(['**Poll**', '', 'Which day suits you?', '', '| Day | Votes |', '| --- | --- |', '| Mon | 3 |', '', '- Closes Friday', '', '```', 'raw: 1', '```'].join('\n'));
+  });
+
+  it('does not render the summary twice or leave the original document altered', () => {
+    const dump = `<details><summary>Weather</summary><p>Sunny</p></details>`;
+    const r = convert(app('zzzUnknown7', undefined, dump));
+    expect(r.markdown.match(/Weather/g)).toHaveLength(1);
   });
 
   it('keeps unknown apps as a generic table and records a warning for follow-up', () => {

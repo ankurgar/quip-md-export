@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -7,9 +8,11 @@ import type { ExportEvent, ExportOptions, ExportSummary } from '../../src/core/e
 import { AuthError, READ_ONLY_ENDPOINTS } from '../../src/core/quipClient';
 import { createSession } from '../../src/core/session';
 import {
+  ANN,
   B_OK,
   F_ARCH,
   F_DESK,
+  F_LOCKED,
   F_PRIV,
   F_PROJ,
   F_SHARED,
@@ -37,8 +40,8 @@ let ctx: Ctx;
 const open: MockQuip[] = [];
 const dirs: string[] = [];
 
-/** Every top-level folder of the mock account, as the extension reports them. */
-const ALL_ROOTS = [F_PRIV, F_DESK, F_SHARED, F_ARCH, F_STAR, F_TRASH];
+/** Every top-level folder of the mock account that holds documents, as the extension reports them (Starred is a view, so it is left out). */
+const ALL_ROOTS = [F_PRIV, F_DESK, F_SHARED, F_ARCH, F_TRASH];
 
 async function setup(mockOptions: MockOptions = {}): Promise<Ctx> {
   const clock = virtualClock();
@@ -362,6 +365,184 @@ describe('never overwriting what this tool did not create', () => {
     expect(await read('_Quip export report.md', odd)).toMatch(/^# Quip export report\n/);
     expect(tree).toContain('_attachments (2)/');
     expect(tree).toContain('_attachments/PLANthread1/BLOBok00001.png');
+  });
+});
+
+describe('never overwriting, checked again on every run', () => {
+  it('keeps an existing report that is not its own, and writes its report beside it', async () => {
+    await writeFile(join(ctx.dir, '_Quip export report.md'), 'MY OWN REPORT');
+    const first = await runAll();
+    expect(first.reportPath).toBe('_Quip export report (2).md');
+    expect(await read('_Quip export report.md')).toBe('MY OWN REPORT');
+    expect(await read('_Quip export report (2).md')).toMatch(/^# Quip export report\n/);
+
+    const second = await runAll();
+    expect(second.reportPath).toBe('_Quip export report (2).md'); // its own report is recognised and updated in place
+    expect(await read('_Quip export report.md')).toBe('MY OWN REPORT');
+    expect(await read('_Quip export report (2).md')).toContain('9 unchanged since the last run');
+  });
+
+  it('leaves a file that replaced one of its notes alone, and writes the note to a new name', async () => {
+    await runAll();
+    await writeFile(join(ctx.dir, 'Private/Notes.md'), 'MY OWN NOTES REPLACED THE EXPORTED ONE');
+    const again = await runAll();
+    expect(await read('Private/Notes.md')).toBe('MY OWN NOTES REPLACED THE EXPORTED ONE');
+    expect(again.docs.exported).toBe(1);
+    expect(again.relocated).toEqual([expect.objectContaining({ id: 'NOTESthrdA1', from: 'Private/Notes.md', to: 'Private/Notes (3).md' })]);
+    expect(await read('Private/Notes (3).md')).toContain('quip_id: "NOTESthrdA1"');
+    expect((await runAll()).docs).toMatchObject({ exported: 0, skipped: 9 }); // and the new name is stable
+  });
+
+  it('checks once more just before writing, so a file that appears after the scan is not replaced either', async () => {
+    const events: ExportEvent[] = [];
+    const late = (e: ExportEvent): void => {
+      events.push(e);
+      if (e.type === 'phase' && e.phase === 'export') {
+        mkdirSync(join(ctx.dir, 'Private'), { recursive: true });
+        writeFileSync(join(ctx.dir, 'Private/Notes.md'), 'APPEARED AFTER THE SCAN');
+      }
+    };
+    const summary = await makeSession({}, { onEvent: late }).exporter.run();
+    expect(summary.docs).toMatchObject({ exported: 9, failed: 0 });
+    expect(await read('Private/Notes.md')).toBe('APPEARED AFTER THE SCAN');
+    expect(await read('Private/Notes (3).md')).toContain('quip_id: "NOTESthrdA1"');
+    expect(events.some((e) => e.type === 'log' && e.level === 'warn' && /appeared/.test(e.message))).toBe(true);
+    expect((await runAll()).docs).toMatchObject({ exported: 0, skipped: 9 });
+  });
+
+  it('does not take over a file whose name it merely remembers from its state', async () => {
+    await runAll();
+    await rm(join(ctx.dir, 'Private/Rental Records.xlsx'));
+    await writeFile(join(ctx.dir, 'Private/Rental Records.md'), 'NOT A QUIP NOTE'); // the note itself was replaced
+    const again = await runAll();
+    expect(await read('Private/Rental Records.md')).toBe('NOT A QUIP NOTE');
+    expect(await read('Private/Rental Records (2).md')).toContain('quip_id: "tRENTALthr1"');
+    expect(again.docs.exported).toBe(2); // the note, and the plan that links to it, so that link follows the note to its new name
+    expect(await read('Private/Projects/Project Plan.md')).toContain('[Rental Records](../Rental%20Records%20%282%29.md)');
+  });
+});
+
+describe('resuming with missing pieces', () => {
+  it('fetches again an attachment or spreadsheet copy that was deleted, instead of skipping its note', async () => {
+    await runAll();
+    await rm(join(ctx.dir, '_attachments/PLANthread1/BLOBok00001.png'));
+    await rm(join(ctx.dir, 'Private/Rental Records.xlsx'));
+    const again = await runAll();
+    expect(again.docs).toMatchObject({ exported: 2, skipped: 7 });
+    expect(new Uint8Array(await readFile(join(ctx.dir, '_attachments/PLANthread1/BLOBok00001.png')))).toEqual(PNG_1X1);
+    expect(new Uint8Array(await readFile(join(ctx.dir, 'Private/Rental Records.xlsx')))).toEqual(XLSX_BYTES);
+    expect((await runAll()).docs.exported).toBe(0);
+  });
+
+  it('keeps a failed forced re-export marked, so a normal run afterwards does not treat the old copy as current', async () => {
+    let failing = false;
+    const flaky = await setup({ override: (req) => (failing && req.path === '/2/threads/NOTESthrdA1/html' ? { status: 500 } : undefined) });
+    await runAll({}, flaky);
+    failing = true;
+    const forced = await runAll({ skipUnchanged: false }, flaky);
+    expect(forced.docs).toMatchObject({ exported: 8, failed: 1 });
+    failing = false;
+    const next = await runAll({}, flaky);
+    expect(next.docs).toMatchObject({ exported: 1, skipped: 8, failed: 0 });
+  });
+
+  it('turning the raw archive off does not re-export anything', async () => {
+    await runAll({ keepRaw: true });
+    expect((await runAll({ keepRaw: false })).docs).toMatchObject({ exported: 0, skipped: 9 });
+  });
+});
+
+describe('attachments shared by several notes', () => {
+  it('reports a failed download on every note that uses it, and retries all of them', async () => {
+    let failing = true;
+    const shared = await setup({ override: (req) => (failing && req.path === `/1/blob/${T_PLAN}/${B_OK}` ? { status: 500 } : undefined) });
+    for (const id of ['NOTESthrdA1', 'NOTESthrdB1']) {
+      const doc = shared.mock.fixture.threads[id];
+      if (doc) doc.pages = [`${doc.pages[0]}<div data-section-style='11'><img src='/blob/${T_PLAN}/${B_OK}' alt='shared'/></div>`];
+    }
+    const first = await runAll({}, shared);
+    expect(first.warnings['attachment-missing']?.count).toBe(4); // Project Plan twice (this image and the refused one), then both notes
+    expect(await read('Private/Notes.md', shared)).toContain('*[missing image: shared]*');
+    expect(await read('Private/notes (2).md', shared)).toContain('*[missing image: shared]*');
+
+    failing = false;
+    const second = await runAll({}, shared);
+    expect(second.docs).toMatchObject({ exported: 3, skipped: 6 }); // all three were marked for retry, not just the first
+    expect(await read('Private/Notes.md', shared)).toContain('![shared](../_attachments/PLANthread1/BLOBok00001.png)');
+    expect(await read('Private/notes (2).md', shared)).toContain('![shared](../_attachments/PLANthread1/BLOBok00001.png)');
+    expect((await runAll({}, shared)).docs.exported).toBe(0);
+  });
+});
+
+describe('documents in no folder', () => {
+  it('exports a document you wrote that is only starred, because Starred is a view and not a place', async () => {
+    const starred = await setup();
+    const loose = starred.mock.fixture.threads[T_LOOSE];
+    if (!loose) throw new Error('fixture changed');
+    starred.mock.fixture.threads.STARONLYth01 = { ...loose, id: 'STARONLYth01', title: 'Starred only' };
+    starred.mock.fixture.owned.push('STARONLYth01');
+    starred.mock.fixture.folders[F_STAR]?.children.push({ thread_id: 'STARONLYth01' });
+    await runAll({}, starred);
+    expect(await visible(starred)).toContain('_Unfiled/Starred only.md');
+  });
+
+  it('lists folders outside the selection that could not be read, because their documents may then look unfiled', async () => {
+    const summary = await runAll({ rootIds: [F_PRIV], allRootIds: [F_PRIV, F_LOCKED] });
+    expect(summary.docs.failed).toBe(0);
+    const report = await read('_Quip export report.md');
+    expect(report).toContain('- Folder `fLOCKED0001`, outside your selection (HTTP 403)');
+    expect(report).toContain('a document you wrote there can appear under the unfiled directory');
+  });
+
+  it('reports a document it listed as unfiled but could not read', async () => {
+    const odd = await setup({ override: (req) => (req.path === '/2/threads/' && req.query.ids?.includes('GHOSTthrd001') ? { status: 403 } : undefined) });
+    const loose = odd.mock.fixture.threads[T_LOOSE];
+    if (!loose) throw new Error('fixture changed');
+    odd.mock.fixture.threads.GHOSTthrd001 = { ...loose, id: 'GHOSTthrd001', title: 'Ghost' };
+    odd.mock.fixture.owned.push('GHOSTthrd001');
+    const summary = await runAll({}, odd);
+    expect(summary.unreadableThreads).toContainEqual({ id: 'GHOSTthrd001', status: 403, folderPath: '_Unfiled' });
+    expect(await read('_Quip export report.md', odd)).toContain('Document `GHOSTthrd001` in _Unfiled (HTTP 403)');
+  });
+});
+
+describe('downloads that are not what they claim to be', () => {
+  it('does not save or link a spreadsheet copy that is not a workbook', async () => {
+    const bad = await setup({ override: (req) => (req.path === `/1/threads/${T_RENTAL}/export/xlsx` ? { status: 200, body: { note: 'definitely not a workbook' } } : undefined) });
+    const summary = await runAll({}, bad);
+    expect(summary.warnings['xlsx-failed']).toBeDefined();
+    expect(await visible(bad)).not.toContain('Private/Rental Records.xlsx');
+    expect(await read('Private/Rental Records.md', bad)).not.toContain('.xlsx');
+  });
+
+  it('treats an error object delivered with a 200 as a failure', async () => {
+    const bad = await setup({ override: (req) => (req.path === `/1/threads/${T_RENTAL}/export/xlsx` ? { status: 200, body: { error: 'application_error', error_code: 404, error_description: 'No such file' } } : undefined) });
+    const summary = await runAll({}, bad);
+    expect(summary.warnings['xlsx-failed']?.examples.join(' ')).toContain('HTTP 200');
+    expect(await visible(bad)).not.toContain('Private/Rental Records.xlsx');
+  });
+});
+
+describe('comments Quip will not list in full', () => {
+  it('says so when more comments share one timestamp than a page holds', async () => {
+    const tied = await setup();
+    const doc = tied.mock.fixture.threads.NOTESthrdA1;
+    if (doc) doc.messages = ['a', 'b', 'c'].map((id) => ({ id: `tie${id}`, author_id: ANN.id, author_name: ANN.name, created_usec: 5_000_000, text: `comment ${id}` }));
+    const summary = await runAll({}, tied);
+    expect(summary.warnings['comments-incomplete']).toBeDefined();
+  });
+});
+
+describe('dates that depend on the time zone', () => {
+  it('re-renders only documents with a project tracker when the time zone changes, and flags a guessed day', async () => {
+    const first = await runAll({ timeZone: 'UTC' });
+    expect(first.warnings['ambiguous-date']).toBeDefined(); // 08:00 UTC is midnight in Los Angeles, not in UTC
+    expect((await runAll({ timeZone: 'UTC' })).docs).toMatchObject({ exported: 0, skipped: 9 });
+
+    const moved = await runAll({ timeZone: 'America/Los_Angeles' });
+    expect(moved.docs).toMatchObject({ exported: 1, skipped: 8 });
+    expect(moved.warnings['ambiguous-date']).toBeUndefined();
+    expect(await read('Private/Projects/Project Plan.md')).toContain('2020-11-18');
   });
 });
 

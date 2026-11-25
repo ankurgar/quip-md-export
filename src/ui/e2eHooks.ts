@@ -3,10 +3,10 @@
  * It deliberately sends a write request to prove the browser-level guard blocks it.
  */
 /** An empty folder in the origin-private file system, standing in for the folder picker in tests. */
-export async function freshTestTarget(): Promise<FileSystemDirectoryHandle> {
+export async function freshTestTarget(name = 'e2e-target'): Promise<FileSystemDirectoryHandle> {
   const root = await navigator.storage.getDirectory();
-  await root.removeEntry('e2e-target', { recursive: true }).catch(() => undefined);
-  return root.getDirectoryHandle('e2e-target', { create: true });
+  await root.removeEntry(name, { recursive: true }).catch(() => undefined);
+  return root.getDirectoryHandle(name, { create: true });
 }
 
 export function installTestHooks(getTarget: () => FileSystemDirectoryHandle | undefined, useTarget: (handle: FileSystemDirectoryHandle) => Promise<void>): void {

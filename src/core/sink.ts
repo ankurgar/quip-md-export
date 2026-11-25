@@ -4,6 +4,8 @@ export interface Sink {
   ensureDir(path: string): Promise<void>;
   writeFile(path: string, data: string | Uint8Array): Promise<void>;
   readText(path: string): Promise<string | undefined>;
+  /** The first `maxBytes` bytes as text, or undefined when the file does not exist. Cheap way to recognise a file. */
+  readHead(path: string, maxBytes: number): Promise<string | undefined>;
   exists(path: string): Promise<boolean>;
 }
 
@@ -37,6 +39,12 @@ export class MemorySink implements Sink {
     const data = this.files.get(path);
     if (data === undefined) return Promise.resolve(undefined);
     return Promise.resolve(typeof data === 'string' ? data : new TextDecoder().decode(data));
+  }
+
+  async readHead(path: string, maxBytes: number): Promise<string | undefined> {
+    const data = this.files.get(path);
+    if (data === undefined) return undefined;
+    return typeof data === 'string' ? data.slice(0, maxBytes) : new TextDecoder().decode(data.subarray(0, maxBytes));
   }
 
   exists(path: string): Promise<boolean> {

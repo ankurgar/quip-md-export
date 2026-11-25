@@ -47,6 +47,8 @@ export interface BlobRef {
  */
 export const BLOB_SCHEME = 'quip-blob:';
 export const DOC_SCHEME = 'quip-doc:';
+/** Separates a document id from the number of its link variant: `quip-doc:ID~2` is the third distinct address that links to ID. */
+export const DOC_VARIANT = '~';
 
 export interface ConvertResult {
   markdown: string;
