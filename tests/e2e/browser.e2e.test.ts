@@ -4,8 +4,8 @@ import { join, resolve } from 'node:path';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSession } from '../../src/core/session';
-import { F_ARCH, F_DESK, F_PRIV, F_SHARED, PNG_1X1, SITE, T_PLAN, TOKEN } from '../mock/fixture';
-import { startMockQuip, type MockQuip } from '../mock/quipMock';
+import { F_ARCH, F_DESK, F_PRIV, F_SHARED, F_STAR, F_TRASH, ME, PNG_1X1, SITE, T_PLAN, T_RENTAL_SECRET, TOKEN, XLSX_BYTES } from '../mock/fixture';
+import { probeHtml, startMockQuip, type MockQuip } from '../mock/quipMock';
 import { NodeFsSink, parseHtml } from '../helpers/env';
 
 const EXTENSION = resolve(__dirname, '../../dist-e2e');
@@ -109,7 +109,14 @@ describe('the extension in a real Chromium', () => {
         baseUrl: mock.url,
         sink: new NodeFsSink(dir),
         parseHtml,
-        options: { rootIds: [F_PRIV, F_DESK, F_SHARED, F_ARCH], siteUrl: SITE },
+        // Exactly what the page sends with its default settings.
+        options: {
+          rootIds: [F_PRIV, F_DESK, F_SHARED, F_ARCH],
+          allRootIds: [F_PRIV, F_DESK, F_SHARED, F_ARCH, F_STAR, F_TRASH],
+          ownerId: ME.id,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          siteUrl: SITE,
+        },
         client: { minIntervalMs: 0 },
       });
       await exporter.run();
@@ -121,6 +128,8 @@ describe('the extension in a real Chromium', () => {
     expect(tree['Private/Projects/Project Plan.md']).toContain('**Calendar** (2021-10)');
     expect(tree['Private/Rental Records.md']).toContain('| Month | Rent | Paid |');
     expect(tree['_attachments/PLANthread1/BLOBok00001.png']).toBe(`<binary ${PNG_1X1.length} bytes>`);
+    expect(tree['Private/Rental Records.xlsx']).toBe(`<binary ${XLSX_BYTES.length} bytes>`);
+    expect(tree['Private/Rental Records.md']).toContain('Original spreadsheet with its formulas: [Rental Records.xlsx]');
     expect(tree['Desktop/']).toBe('');
     expect(Object.keys(tree)).toContain('.quip-md-export/state.json');
     await page.close();
@@ -143,7 +152,8 @@ describe('the extension in a real Chromium', () => {
     await page.fill('#opt-max', '');
     await page.click('#btn-run');
     await state(page, 'done');
-    await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 7 saved, 2 unchanged of 9 documents/);
+    // A note whose links could not be resolved on the first run is rendered again now that their targets exist.
+    await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 8 saved, 1 unchanged of 9 documents/);
     await page.close();
   });
 
@@ -157,7 +167,7 @@ describe('the extension in a real Chromium', () => {
     await state(page, 'done');
     const tree = await readTree(page);
     expect(Object.keys(tree).filter((p) => p.endsWith('.md') && !p.startsWith('_'))).toEqual(['Project Plan.md']);
-    expect(tree['Project Plan.md']).toContain('[Rental Records](https://acme.quip.com/tRENTALthr1v)');
+    expect(tree['Project Plan.md']).toContain('[Rental Records](https://acme.quip.com/tRENTALthr1v/Rental-Records#temp:C:abc)');
     await page.close();
   });
 
@@ -171,20 +181,167 @@ describe('the extension in a real Chromium', () => {
     await page.close();
   });
 
-  it('blocks writes to Quip at the browser level while reads still work', async () => {
+  it('blocks every kind of write, even to an address the extension has no permission for, while reads still work', async () => {
     const page = await openExporter();
-    const hooks = (url: string, kind: 'tryMutation' | 'tryRead') =>
-      page.evaluate(([u, k]) => (window as unknown as { __e2e: Record<string, (x: string) => Promise<string>> }).__e2e[k as string]!(u as string), [url, kind]);
+    const hook = (name: string, ...args: string[]) =>
+      page.evaluate(([n, a]) => (window as unknown as { __e2e: Record<string, (...x: string[]) => Promise<string>> }).__e2e[n as string]!(...(a as string[])), [name, args] as const);
 
     const before = mock.requests.length;
-    expect(await hooks(`${mock.url}/1/threads/edit-document`, 'tryMutation')).toMatch(/^blocked:/);
-    expect(await hooks(`${mock.url}/1/folders/new`, 'tryMutation')).toMatch(/^blocked:/);
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      expect(await hook('tryMutation', `${mock.url}/1/threads/edit-document`, method), method).toMatch(/^blocked:/);
+    }
     // The blocked requests never reached the server...
     expect(mock.requests.length).toBe(before);
     // ...while a plain GET to the same host goes through (401: no token supplied by this probe).
-    expect(await hooks(`${mock.url}/1/users/current`, 'tryRead')).toBe('reached:401');
+    expect(await hook('tryRead', `${mock.url}/1/users/current`)).toBe('reached:401');
     expect(mock.requests.length).toBe(before + 1);
+
+    // The same server under a name the extension has no host permission for. Browser security makes the
+    // answers unreadable, so the server's own log is the witness: the read arrives, the write never does.
+    const elsewhere = mock.url.replace('127.0.0.1', 'localhost');
+    await hook('tryRead', `${elsewhere}/guard/get`);
+    await hook('tryMutation', `${elsewhere}/guard/post`);
+    const seen = mock.requests.map((r) => `${r.method} ${r.path}`);
+    expect(seen).toContain('GET /guard/get');
+    expect(seen).not.toContain('POST /guard/post');
     expect(mock.mutating()).toEqual([]);
     await page.close();
+  });
+
+  it('never fetches the sub-resources that Quip HTML points at', async () => {
+    const probe = await startMockQuip({ probe: true });
+    const plain = await context.newPage();
+    const page = await openExporter({ base: probe.url });
+    try {
+      // Parsing is inert in this browser...
+      await plain.goto(`${probe.url}/control.html`);
+      const markup = probeHtml(probe.url);
+      await plain.evaluate((html) => void new DOMParser().parseFromString(html, 'text/html'), markup);
+      await plain.waitForTimeout(500);
+      expect(probe.probeHits()).toEqual([]);
+      // ...whereas the same markup in a live page does make the browser fetch things, so the probe can detect a leak.
+      await plain.evaluate((html) => {
+        const box = document.createElement('div');
+        box.innerHTML = html;
+        document.body.append(box);
+      }, markup);
+      await expect.poll(() => probe.probeHits().length, { timeout: 10_000 }).toBeGreaterThan(0);
+      const control = probe.probeHits().length;
+
+      // A whole export of documents full of such tags fetches none of them.
+      await connect(page);
+      await page.click('#btn-run');
+      await state(page, 'done');
+      await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved/);
+      await page.waitForTimeout(500);
+      expect(probe.probeHits().length).toBe(control);
+      expect(probe.mutating()).toEqual([]);
+      const tree = await readTree(page);
+      const raw = Object.entries(tree).filter(([path]) => path.endsWith('/body.html'));
+      expect(raw.length).toBeGreaterThan(0);
+      expect(raw.every(([, html]) => html.includes(`${probe.url}/probe/img.png`))).toBe(true); // the tags really were in what was fetched
+    } finally {
+      await Promise.all([plain.close(), page.close()]);
+      await probe.close();
+    }
+  });
+
+  it('keeps the token only while "Remember" is ticked, and forgets it the moment it is unticked', async () => {
+    const page = await openExporter();
+    const stored = () => page.evaluate(async () => ((await chrome.storage.local.get('token')) as { token?: string }).token ?? null);
+    expect(await stored()).toBeNull();
+    await page.check('#remember');
+    await connect(page);
+    expect(await stored()).toBe(TOKEN);
+    await page.uncheck('#remember');
+    await expect.poll(stored, { timeout: 5_000 }).toBeNull();
+    await page.check('#remember');
+    await expect.poll(stored, { timeout: 5_000 }).toBe(TOKEN);
+    await page.uncheck('#remember');
+    await expect.poll(stored, { timeout: 5_000 }).toBeNull();
+    await page.close();
+  });
+
+  it('writes to the folder chosen last, even when the folder scanned earlier has the same name', async () => {
+    const page = await openExporter();
+    const hook = (name: string, arg: string) =>
+      page.evaluate(([n, a]) => (window as unknown as { __e2e: Record<string, (x: string) => Promise<unknown>> }).__e2e[n as string]!(a as string), [name, arg] as const);
+    await connect(page);
+    await page.click('#btn-scan');
+    await state(page, 'scanned');
+
+    await hook('switchTarget', `elsewhere-${Date.now()}/e2e-target`);
+    await page.click('#btn-run');
+    await state(page, 'done');
+    expect(Object.keys(await readTree(page))).toContain('Private/Rental Records.md');
+    expect(await hook('readTreeAt', 'e2e-target')).toEqual({}); // the folder that was scanned stays untouched
+    await page.close();
+  });
+
+  it('saves a spreadsheet\'s .xlsx only when asked, and re-exports the note when that choice changes', async () => {
+    const page = await openExporter({ from: `${SITE}/${T_RENTAL_SECRET}/Rental-Records` });
+    await connect(page);
+    await page.uncheck('#opt-xlsx');
+    await page.click('#btn-run');
+    await state(page, 'done');
+    let tree = await readTree(page);
+    expect(Object.keys(tree).filter((p) => !p.startsWith('.') && !p.startsWith('_'))).toEqual(['Rental Records.md']);
+    expect(tree['Rental Records.md']).not.toContain('.xlsx');
+
+    await page.check('#opt-xlsx');
+    await page.click('#btn-run');
+    await state(page, 'done');
+    await expect(page.textContent('#run-status')).resolves.toMatch(/1 saved, 0 unchanged/);
+    tree = await readTree(page);
+    expect(tree['Rental Records.xlsx']).toBe(`<binary ${XLSX_BYTES.length} bytes>`);
+    expect(tree['Rental Records.md']).toContain('[Rental Records.xlsx](Rental%20Records.xlsx)');
+    await page.close();
+  });
+
+  it('applies a Quip page picked mid-export only once the export has finished, without reconnecting', async () => {
+    const slow = await startMockQuip({ delayMs: 60 });
+    const page = await openExporter({ base: slow.url });
+    try {
+      await connect(page);
+      await expect(page.isVisible('#page-scope')).resolves.toBe(false);
+      await page.click('#btn-run');
+      await state(page, 'running');
+      const worker = context.serviceWorkers()[0] as NonNullable<ReturnType<BrowserContext['serviceWorkers']>[number]>;
+      await worker.evaluate((url) => chrome.runtime.sendMessage({ type: 'quip-source-url', url }), `${SITE}/${T_PLAN}/Project-Plan`);
+      await expect.poll(() => page.textContent('#log'), { timeout: 10_000 }).toContain('Another Quip page was selected');
+      expect(await page.getAttribute('body', 'data-state')).toBe('running');
+
+      await state(page, 'done', 120_000);
+      await expect(page.textContent('#run-status')).resolves.toMatch(/Done\. 9 saved/); // the export that was running was not disturbed
+      await expect.poll(() => page.textContent('#page-label'), { timeout: 15_000 }).toBe('Document: Project Plan');
+      await expect(page.isChecked('#scope-page')).resolves.toBe(true);
+      await expect(page.textContent('#connect-status')).resolves.toContain('Connected as Jane Doe');
+      expect(await page.getAttribute('body', 'data-state')).toBe('done');
+    } finally {
+      await page.close();
+      await slow.close();
+    }
+  });
+
+  it('stops and disconnects when Quip rejects the token part-way through an export', async () => {
+    let htmlRequests = 0;
+    const flaky = await startMockQuip({ override: (req) => (req.path.endsWith('/html') && ++htmlRequests > 2 ? { status: 401 } : undefined) });
+    const page = await openExporter({ base: flaky.url });
+    try {
+      await connect(page);
+      await page.click('#btn-run');
+      await state(page, 'idle');
+      const status = (await page.textContent('#run-status')) ?? '';
+      expect(status).toContain('Stopped: Quip rejected the access token');
+      expect(status).not.toContain('Done.');
+      expect(await page.isDisabled('#btn-run')).toBe(true);
+      await expect(page.getAttribute('#connect-status', 'data-tone')).resolves.toBe('error');
+      const report = (await readTree(page))['_Quip export report.md'] ?? '';
+      expect(report).toContain('Stopped: Quip rejected the access token');
+      expect(report).toMatch(/\d+ not attempted/);
+    } finally {
+      await page.close();
+      await flaky.close();
+    }
   });
 });

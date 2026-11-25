@@ -1,19 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { guardPattern } from '../../src/ui/guard';
+import { guardRule } from '../../src/ui/guard';
 
-describe('browser-level guard pattern', () => {
-  const re = (loopback: boolean) => new RegExp(guardPattern(loopback));
+describe('browser-level guard rule', () => {
+  const rule = guardRule('abcdefghijklmnopabcdefghijklmnop');
+  const pattern = new RegExp(rule.condition.regexFilter as string);
 
-  it('covers the Quip API and site hosts', () => {
-    for (const url of ['https://platform.quip.com/1/threads/edit-document', 'https://acme.quip.com/anything', 'https://quip.com/x', 'http://platform.quip.com/1/x']) {
-      expect(re(false).test(url)).toBe(true);
-    }
+  it('blocks every way of changing something and leaves reads alone', () => {
+    const methods = rule.condition.requestMethods as string[];
+    for (const m of ['post', 'put', 'patch', 'delete', 'other']) expect(methods).toContain(m);
+    for (const m of ['get', 'head', 'options']) expect(methods).not.toContain(m);
+    expect(rule.action.type).toBe('block');
   });
 
-  it('does not touch unrelated hosts or look-alikes, and only allows loopback in test builds', () => {
-    for (const url of ['https://example.com/', 'https://evilquip.com/', 'https://quip.com.evil.example/x', 'http://127.0.0.1:8080/1/x']) {
-      expect(re(false).test(url)).toBe(false);
+  it('applies to any web address, not just Quip, but only to requests the extension itself makes', () => {
+    for (const url of ['https://platform.quip.com/1/threads/edit-document', 'https://acme.quip.com/x', 'https://example.com/', 'http://127.0.0.1:8080/1/x', 'http://localhost/x']) {
+      expect(pattern.test(url), url).toBe(true);
     }
-    expect(re(true).test('http://127.0.0.1:8080/1/x')).toBe(true);
+    expect(rule.condition.initiatorDomains).toEqual(['abcdefghijklmnopabcdefghijklmnop']);
+  });
+
+  it('includes page loads and every sub-resource type, so a form post or beacon cannot slip through', () => {
+    const types = rule.condition.resourceTypes as string[];
+    for (const t of ['main_frame', 'sub_frame', 'xmlhttprequest', 'ping', 'websocket', 'other']) expect(types).toContain(t);
   });
 });

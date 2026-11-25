@@ -42,6 +42,12 @@ describe('static read-only checks on shipped source', () => {
     for (const f of SHIPPED) expect(f.text, f.path).not.toMatch(/\.removeEntry\s*\(|\.unlink\s*\(|\brmSync\b|\brm\s*\(/);
   });
 
+  it('never writes Quip HTML into a live page', () => {
+    for (const f of SHIPPED) {
+      expect(f.text, f.path).not.toMatch(/\.innerHTML\s*=|\.outerHTML\s*=|insertAdjacentHTML|document\.write|createContextualFragment|importNode|adoptNode/);
+    }
+  });
+
   it('keeps the test hooks out of every shipped module', () => {
     for (const f of SHIPPED) expect(f.text, f.path).not.toMatch(/tryMutation|__e2e/);
   });

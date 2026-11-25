@@ -38,13 +38,14 @@ interface Settings {
   remember: boolean;
   includeComments: boolean;
   keepRaw: boolean;
+  saveXlsx: boolean;
   skipUnchanged: boolean;
   includeUnfiled: boolean;
   maxDocs: string;
   roots: string[] | null;
 }
 
-const DEFAULT_SETTINGS: Settings = { remember: false, includeComments: true, keepRaw: true, skipUnchanged: true, includeUnfiled: true, maxDocs: '', roots: null };
+const DEFAULT_SETTINGS: Settings = { remember: false, includeComments: true, keepRaw: true, saveXlsx: true, skipUnchanged: true, includeUnfiled: true, maxDocs: '', roots: null };
 const KIND_LABEL: Record<RootChoice['kind'], string> = {
   private: 'Private',
   desktop: 'Desktop',
@@ -81,6 +82,7 @@ const ui = {
   roots: byId('roots'),
   comments: byId<HTMLInputElement>('opt-comments'),
   raw: byId<HTMLInputElement>('opt-raw'),
+  xlsx: byId<HTMLInputElement>('opt-xlsx'),
   skip: byId<HTMLInputElement>('opt-skip'),
   unfiled: byId<HTMLInputElement>('opt-unfiled'),
   max: byId<HTMLInputElement>('opt-max'),
@@ -105,6 +107,11 @@ let fromUrl = params.get('from') ?? undefined;
 let controller: AbortController | undefined;
 let session: ReturnType<typeof createSession> | undefined;
 let sessionKey = '';
+/** Bumped whenever the account or target folder changes, so a cached scan can never be reused for the wrong place. */
+let epoch = 0;
+/** Only one of connect, scan and export may run at a time. */
+let working = false;
+let pendingFrom: string | undefined;
 let throttleUntil = 0;
 
 // ---- small helpers -------------------------------------------------------
@@ -139,8 +146,10 @@ function estimateMs(requests: number): number {
   return (fast / 45) * 60_000 + (slow / 750) * 3_600_000;
 }
 
+const TOKEN_REJECTED = 'Quip rejected the access token. Create a new one at quip.com/dev/token and connect again.';
+
 function describeError(err: unknown): string {
-  if (err instanceof AuthError) return 'Quip rejected the access token. Create a new one at quip.com/dev/token and connect again.';
+  if (err instanceof AuthError) return TOKEN_REJECTED;
   if (err instanceof QuipHttpError) return err.message;
   return err instanceof Error ? err.message : String(err);
 }
@@ -160,7 +169,7 @@ function refresh(): void {
   ui.scan.disabled = busy || !conn || !target;
   ui.run.disabled = busy || !conn || !target || !hasScope();
   ui.stop.disabled = phase !== 'scanning' && phase !== 'running';
-  for (const el of [ui.comments, ui.raw, ui.skip, ui.unfiled, ui.max, ui.scopeAll, ui.scopePage]) el.disabled = busy;
+  for (const el of [ui.comments, ui.raw, ui.xlsx, ui.skip, ui.unfiled, ui.max, ui.scopeAll, ui.scopePage]) el.disabled = busy;
   for (const box of ui.roots.querySelectorAll('input')) box.disabled = busy;
 }
 
@@ -171,20 +180,23 @@ async function loadSettings(): Promise<Settings> {
   return { ...DEFAULT_SETTINGS, ...(stored.settings ?? {}) };
 }
 
-function currentSettings(): Settings {
+function currentSettings(roots: string[] | null): Settings {
   return {
     remember: ui.remember.checked,
     includeComments: ui.comments.checked,
     keepRaw: ui.raw.checked,
+    saveXlsx: ui.xlsx.checked,
     skipUnchanged: ui.skip.checked,
     includeUnfiled: ui.unfiled.checked,
     maxDocs: ui.max.value.trim(),
-    roots: selectedRoots(),
+    roots,
   };
 }
 
 async function saveSettings(): Promise<void> {
-  await chrome.storage.local.set({ settings: currentSettings() });
+  // Before connecting there are no folder checkboxes to read, so the selection saved earlier is kept.
+  const roots = conn ? selectedRoots() : (await loadSettings()).roots;
+  await chrome.storage.local.set({ settings: currentSettings(roots) });
 }
 
 async function loadToken(): Promise<string | undefined> {
@@ -211,11 +223,13 @@ async function describeTarget(handle: FileSystemDirectoryHandle): Promise<void> 
   }
   ui.targetHint.textContent =
     entries > 0
-      ? 'This folder already has files. The export only adds and updates files; it never deletes anything.'
+      ? 'This folder already has files. The export adds files and updates only the ones it created earlier; it never deletes anything and never overwrites other files.'
       : "Quip's folder structure is recreated inside it. A new, empty folder or an Obsidian vault works well.";
 }
 
 async function useTarget(handle: FileSystemDirectoryHandle): Promise<void> {
+  epoch += 1;
+  session = undefined;
   target = handle;
   pendingHandle = undefined;
   ui.regrant.hidden = true;
@@ -269,13 +283,16 @@ function renderRoots(saved: string[] | null): void {
   const legend = document.createElement('legend');
   legend.textContent = 'Folders';
   ui.roots.append(legend);
+  // A selection saved for another account would leave nothing ticked, so it only counts if it matches something here.
+  const known = new Set((conn?.roots ?? []).map((r) => r.id));
+  const usable = saved?.some((id) => known.has(id)) ? saved : null;
   for (const root of conn?.roots ?? []) {
     const label = document.createElement('label');
     label.className = 'check';
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.value = root.id;
-    input.checked = saved ? saved.includes(root.id) : root.defaultOn;
+    input.checked = usable ? usable.includes(root.id) : root.defaultOn;
     input.addEventListener('change', refresh);
     const name = document.createElement('span');
     name.textContent = root.title;
@@ -307,36 +324,49 @@ async function resolvePage(client: QuipClient, url: string): Promise<PageTarget 
 }
 
 async function connect(): Promise<void> {
-  const token = ui.token.value.trim();
-  if (!token) {
-    setStatus(ui.connectStatus, 'Paste your Quip access token first.', 'warn');
-    return;
-  }
-  setPhase('connecting');
-  setStatus(ui.connectStatus, 'Connecting…');
-  try {
-    const client = new QuipClient({ token, baseUrl: BASE_URL });
-    const user = await client.currentUser();
-    const choices = rootChoices(user);
-    const folders = await client.getFolders(choices.map((c) => c.id));
-    const roots = choices.map((c) => {
-      const found = folders.get(c.id);
-      return { ...c, title: (found?.ok && found.value.title) || KIND_LABEL[c.kind] };
-    });
-    conn = { token, user, roots };
-    pageTarget = fromUrl ? await resolvePage(client, fromUrl).catch(() => undefined) : undefined;
-    await saveToken(token, ui.remember.checked);
-    const settings = await loadSettings();
-    renderRoots(settings.roots);
-    renderPageScope();
-    const site = user.siteUrl ? ` (${new URL(user.siteUrl).host})` : '';
-    setStatus(ui.connectStatus, `Connected as ${user.name || 'your account'}${site}.`, 'ok');
-    setPhase('connected');
-  } catch (err) {
-    conn = undefined;
-    setStatus(ui.connectStatus, describeError(err), 'error');
-    setPhase('idle');
-  }
+  await exclusive(async () => {
+    const token = ui.token.value.trim();
+    if (!token) {
+      setStatus(ui.connectStatus, 'Paste your Quip access token first.', 'warn');
+      return;
+    }
+    setPhase('connecting');
+    setStatus(ui.connectStatus, 'Connecting…');
+    try {
+      const client = new QuipClient({ token, baseUrl: BASE_URL });
+      const user = await client.currentUser();
+      const choices = rootChoices(user);
+      const folders = await client.getFolders(choices.map((c) => c.id));
+      const roots = choices.map((c) => {
+        const found = folders.get(c.id);
+        return { ...c, title: (found?.ok && found.value.title) || KIND_LABEL[c.kind] };
+      });
+      conn = { token, user, roots };
+      epoch += 1;
+      session = undefined;
+      pageTarget = fromUrl ? await resolvePage(client, fromUrl).catch(() => undefined) : undefined;
+      await saveToken(token, ui.remember.checked);
+      const settings = await loadSettings();
+      renderRoots(settings.roots);
+      renderPageScope();
+      const site = user.siteUrl ? ` (${new URL(user.siteUrl).host})` : '';
+      setStatus(ui.connectStatus, `Connected as ${user.name || 'your account'}${site}.`, 'ok');
+      setPhase('connected');
+    } catch (err) {
+      conn = undefined;
+      setStatus(ui.connectStatus, describeError(err), 'error');
+      setPhase('idle');
+    }
+  });
+}
+
+/** Points the "only what I was viewing" scope at a Quip page without reconnecting. */
+async function selectPage(url: string): Promise<void> {
+  fromUrl = url;
+  if (!conn) return;
+  pageTarget = await resolvePage(new QuipClient({ token: conn.token, baseUrl: BASE_URL }), url).catch(() => undefined);
+  renderPageScope();
+  refresh();
 }
 
 // ---- scan and export -----------------------------------------------------
@@ -346,10 +376,14 @@ function buildOptions(): Partial<ExportOptions> {
   const options: Partial<ExportOptions> = {
     includeComments: ui.comments.checked,
     keepRaw: ui.raw.checked,
+    saveXlsx: ui.xlsx.checked,
     skipUnchanged: ui.skip.checked,
     includeUnfiled: ui.unfiled.checked,
     maxDocs: Number.isFinite(max) && max > 0 ? max : undefined,
     siteUrl: conn?.user.siteUrl,
+    ownerId: conn?.user.id,
+    allRootIds: conn?.roots.map((r) => r.id) ?? [],
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };
   if (ui.scopePage.checked && pageTarget) {
     options.includeUnfiled = false;
@@ -403,7 +437,28 @@ function makeSession(signal: AbortSignal): ReturnType<typeof createSession> {
   });
 }
 
-const scopeKey = (): string => JSON.stringify([buildOptions(), target?.name]);
+const scopeKey = (): string => JSON.stringify([buildOptions(), epoch]);
+
+/** A rejected token disconnects, so nothing else is attempted until a working one is entered. */
+function rejectToken(): void {
+  conn = undefined;
+  session = undefined;
+  setStatus(ui.connectStatus, TOKEN_REJECTED, 'error');
+}
+
+/** Runs one connect, scan, export or page lookup at a time; a Quip page picked meanwhile is applied afterwards. */
+async function exclusive(task: () => Promise<void>): Promise<void> {
+  if (working) return;
+  working = true;
+  try {
+    await task();
+  } finally {
+    working = false;
+    const url = pendingFrom;
+    pendingFrom = undefined;
+    if (url) void exclusive(() => selectPage(url));
+  }
+}
 
 function showPlan(plan: Plan): void {
   const perTop = new Map<string, number>();
@@ -412,7 +467,9 @@ function showPlan(plan: Plan): void {
     perTop.set(top, (perTop.get(top) ?? 0) + 1);
   }
   const lines = [`${plan.threads.length} documents in ${plan.folders.length} folders.`, ...[...perTop].map(([name, n]) => `  ${name}: ${n}`)];
-  if (plan.unfiled > 0) lines.push(`${plan.unfiled} documents sit in no folder; they go under "_Unfiled".`);
+  if (plan.unfiled > 0) lines.push(`${plan.unfiled} documents you wrote sit in no folder; they go under "_Unfiled".`);
+  if (plan.othersUnfiled > 0) lines.push(`${plan.othersUnfiled} documents written by other people are in none of your folders and are not exported.`);
+  if (plan.relocated.length > 0) lines.push(`${plan.relocated.length} documents were moved or renamed in Quip since the last export; they get a new file and the old copy stays.`);
   const unreadable = plan.unreadableFolders.length + plan.unreadableThreads.length;
   if (unreadable > 0) lines.push(`${unreadable} items could not be read with this token and will be listed in the report.`);
   lines.push('', `About ${plan.estimatedRequests} Quip API requests, roughly ${duration(estimateMs(plan.estimatedRequests))} at Quip's rate limits (50 a minute, 750 an hour).`);
@@ -422,22 +479,25 @@ function showPlan(plan: Plan): void {
 
 async function scan(): Promise<void> {
   if (!conn || !target) return;
-  controller = new AbortController();
-  session = makeSession(controller.signal);
-  sessionKey = scopeKey();
-  await saveSettings();
-  ui.scanSummary.hidden = true;
-  setPhase('scanning');
-  setStatus(ui.scanStatus, 'Scanning…');
-  try {
-    showPlan(await session.exporter.scan());
-    setStatus(ui.scanStatus, 'Scan complete. Nothing has been written yet.', 'ok');
-    setPhase('scanned');
-  } catch (err) {
-    session = undefined;
-    setStatus(ui.scanStatus, isAbort(err) ? 'Scan stopped.' : describeError(err), isAbort(err) ? 'warn' : 'error');
-    setPhase(isAbort(err) ? 'connected' : err instanceof AuthError ? 'idle' : 'error');
-  }
+  await exclusive(async () => {
+    try {
+      controller = new AbortController();
+      session = makeSession(controller.signal);
+      sessionKey = scopeKey();
+      await saveSettings();
+      ui.scanSummary.hidden = true;
+      setPhase('scanning');
+      setStatus(ui.scanStatus, 'Scanning…');
+      showPlan(await session.exporter.scan());
+      setStatus(ui.scanStatus, 'Scan complete. Nothing has been written yet.', 'ok');
+      setPhase('scanned');
+    } catch (err) {
+      session = undefined;
+      if (err instanceof AuthError) rejectToken();
+      setStatus(ui.scanStatus, isAbort(err) ? 'Scan stopped.' : describeError(err), isAbort(err) ? 'warn' : 'error');
+      setPhase(isAbort(err) ? 'connected' : err instanceof AuthError ? 'idle' : 'error');
+    }
+  });
 }
 
 async function acquireWakeLock(): Promise<() => Promise<void>> {
@@ -454,41 +514,47 @@ async function acquireWakeLock(): Promise<() => Promise<void>> {
 function summarize(s: ExportSummary): string {
   const parts = [`${s.docs.exported} saved`, `${s.docs.skipped} unchanged`];
   if (s.docs.failed > 0) parts.push(`${s.docs.failed} failed`);
+  if (s.docs.notAttempted > 0) parts.push(`${s.docs.notAttempted} not attempted`);
   return `${parts.join(', ')} of ${s.docs.planned} documents. The report is ${s.reportPath} in the target folder.`;
 }
 
 async function run(): Promise<void> {
   if (!conn || !target) return;
-  if (!session || !controller || controller.signal.aborted || sessionKey !== scopeKey()) {
-    controller = new AbortController();
-    session = makeSession(controller.signal);
-    sessionKey = scopeKey();
-  }
-  const active = session;
-  await saveSettings();
-  ui.log.replaceChildren();
-  ui.progress.value = 0;
-  setPhase('running');
-  setStatus(ui.runStatus, 'Starting…');
-  const release = await acquireWakeLock();
-  try {
-    const summary = await active.exporter.run();
-    if (summary.aborted) {
-      setStatus(ui.runStatus, `Stopped. ${summarize(summary)} Start again to continue where it left off.`, 'warn');
-      setPhase('stopped');
-    } else {
-      ui.progress.value = ui.progress.max;
-      setStatus(ui.runStatus, `Done. ${summarize(summary)}`, summary.docs.failed > 0 ? 'warn' : 'ok');
-      setPhase('done');
+  await exclusive(async () => {
+    let release: () => Promise<void> = async () => undefined;
+    try {
+      if (!session || !controller || controller.signal.aborted || sessionKey !== scopeKey()) {
+        controller = new AbortController();
+        session = makeSession(controller.signal);
+        sessionKey = scopeKey();
+      }
+      const active = session;
+      await saveSettings();
+      ui.log.replaceChildren();
+      ui.progress.value = 0;
+      setPhase('running');
+      setStatus(ui.runStatus, 'Starting…');
+      release = await acquireWakeLock();
+      const summary = await active.exporter.run();
+      if (summary.aborted) {
+        setStatus(ui.runStatus, `Stopped. ${summarize(summary)} Start again to continue where it left off.`, 'warn');
+        setPhase('stopped');
+      } else {
+        ui.progress.value = ui.progress.max;
+        setStatus(ui.runStatus, `Done. ${summarize(summary)}`, summary.docs.failed > 0 ? 'warn' : 'ok');
+        setPhase('done');
+      }
+    } catch (err) {
+      if (err instanceof AuthError) rejectToken();
+      const message = err instanceof AuthError ? `Stopped: ${TOKEN_REJECTED} Progress so far is saved, and the report lists what was not exported.` : describeError(err);
+      setStatus(ui.runStatus, isAbort(err) ? 'Stopped. Progress is saved.' : message, isAbort(err) ? 'warn' : 'error');
+      log(describeError(err), 'error');
+      setPhase(isAbort(err) ? 'stopped' : err instanceof AuthError ? 'idle' : 'error');
+    } finally {
+      session = undefined;
+      await release();
     }
-  } catch (err) {
-    setStatus(ui.runStatus, isAbort(err) ? 'Stopped. Progress is saved.' : describeError(err), isAbort(err) ? 'warn' : 'error');
-    log(describeError(err), 'error');
-    setPhase(isAbort(err) ? 'stopped' : 'error');
-  } finally {
-    session = undefined;
-    await release();
-  }
+  });
 }
 
 // ---- start-up ------------------------------------------------------------
@@ -497,6 +563,7 @@ function applySettings(s: Settings): void {
   ui.remember.checked = s.remember;
   ui.comments.checked = s.includeComments;
   ui.raw.checked = s.keepRaw;
+  ui.xlsx.checked = s.saveXlsx;
   ui.skip.checked = s.skipUnchanged;
   ui.unfiled.checked = s.includeUnfiled;
   ui.max.value = s.maxDocs;
@@ -510,7 +577,7 @@ async function init(): Promise<void> {
 
   applySettings(await loadSettings());
   await restoreTarget();
-  if (__E2E__ && E2E) (await import('./e2eHooks')).installTestHooks(() => target);
+  if (__E2E__ && E2E) (await import('./e2eHooks')).installTestHooks(() => target, useTarget);
 
   ui.connect.addEventListener('click', () => void connect());
   ui.token.addEventListener('keydown', (e) => e.key === 'Enter' && void connect());
@@ -520,13 +587,24 @@ async function init(): Promise<void> {
   ui.run.addEventListener('click', () => void run());
   ui.stop.addEventListener('click', () => controller?.abort());
   for (const el of [ui.scopeAll, ui.scopePage]) el.addEventListener('change', refresh);
+  ui.remember.addEventListener('change', () => {
+    // Unticking must take effect now, not at the next connect.
+    if (!ui.remember.checked) void chrome.storage.local.remove('token');
+    else if (conn) void chrome.storage.local.set({ token: conn.token });
+    void saveSettings();
+  });
   window.addEventListener('beforeunload', (e) => {
     if (phase === 'running') e.preventDefault();
   });
   chrome.runtime.onMessage.addListener((msg: { type?: string; url?: string }) => {
     if (msg.type !== 'quip-source-url' || !msg.url) return;
-    fromUrl = msg.url;
-    if (conn) void connect();
+    const url = msg.url;
+    if (working) {
+      pendingFrom = url;
+      log('Another Quip page was selected. It will be offered when the current task finishes.', 'warn');
+      return;
+    }
+    void exclusive(() => selectPage(url));
   });
   window.setInterval(() => {
     const left = throttleUntil - Date.now();

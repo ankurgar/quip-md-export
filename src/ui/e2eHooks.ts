@@ -9,7 +9,7 @@ export async function freshTestTarget(): Promise<FileSystemDirectoryHandle> {
   return root.getDirectoryHandle('e2e-target', { create: true });
 }
 
-export function installTestHooks(getTarget: () => FileSystemDirectoryHandle | undefined): void {
+export function installTestHooks(getTarget: () => FileSystemDirectoryHandle | undefined, useTarget: (handle: FileSystemDirectoryHandle) => Promise<void>): void {
   const walk = async (dir: FileSystemDirectoryHandle, prefix: string, out: Record<string, string>): Promise<void> => {
     for await (const [name, handle] of (dir as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
       const path = `${prefix}${name}`;
@@ -27,6 +27,11 @@ export function installTestHooks(getTarget: () => FileSystemDirectoryHandle | un
       (r) => `reached:${r.status}`,
       (e: unknown) => `blocked:${e instanceof Error ? e.name : 'error'}`,
     );
+  const nested = async (path: string): Promise<FileSystemDirectoryHandle> => {
+    let dir = await navigator.storage.getDirectory();
+    for (const part of path.split('/')) dir = await dir.getDirectoryHandle(part, { create: true });
+    return dir;
+  };
   (window as unknown as { __e2e: unknown }).__e2e = {
     readTree: async () => {
       const out: Record<string, string> = {};
@@ -34,7 +39,15 @@ export function installTestHooks(getTarget: () => FileSystemDirectoryHandle | un
       if (target) await walk(target, '', out);
       return out;
     },
-    tryMutation: (url: string) => outcome(fetch(url, { method: 'POST', body: '{}' })),
+    /** Lists a folder of the origin-private file system, for checking that nothing was written there. */
+    readTreeAt: async (path: string) => {
+      const out: Record<string, string> = {};
+      await walk(await nested(path), '', out);
+      return out;
+    },
+    /** Behaves as if the user had picked another folder; the name can repeat that of the current one. */
+    switchTarget: async (path: string) => useTarget(await nested(path)),
+    tryMutation: (url: string, method = 'POST') => outcome(fetch(url, { method, body: '{}' })),
     tryRead: (url: string) => outcome(fetch(url, { method: 'GET' })),
   };
 }

@@ -17,7 +17,32 @@ export interface MockOptions {
   throttleEvery?: number;
   /** Clock used for rate-limit reset headers (defaults to Date.now). */
   now?: () => number;
+  /** Wait this long before answering every request, so an export lasts long enough to interrupt. */
+  delayMs?: number;
+  /** Append tags that would load sub-resources from `/probe/...` to every document page; any request there is a leak. */
+  probe?: boolean;
 }
+
+/** Every common way for HTML to make a browser fetch something. `{{MOCK_URL}}` is replaced with the server's address. */
+const PROBE_TAGS = `<div class="probe">
+<img src="{{MOCK_URL}}/probe/img.png" srcset="{{MOCK_URL}}/probe/srcset.png 2x">
+<iframe src="{{MOCK_URL}}/probe/frame.html"></iframe>
+<link rel="stylesheet" href="{{MOCK_URL}}/probe/style.css">
+<link rel="preload" as="image" href="{{MOCK_URL}}/probe/preload.png">
+<script src="{{MOCK_URL}}/probe/script.js"></script>
+<video src="{{MOCK_URL}}/probe/video.mp4" poster="{{MOCK_URL}}/probe/poster.png"></video>
+<audio src="{{MOCK_URL}}/probe/audio.mp3"></audio>
+<object data="{{MOCK_URL}}/probe/object.bin"></object>
+<embed src="{{MOCK_URL}}/probe/embed.bin">
+<input type="image" src="{{MOCK_URL}}/probe/input.png">
+<svg><image href="{{MOCK_URL}}/probe/svg.png"></image></svg>
+<p style="background:url({{MOCK_URL}}/probe/bg.png)">styled</p>
+<img src="broken" onerror="fetch('{{MOCK_URL}}/probe/onerror')">
+<a href="{{MOCK_URL}}/probe/link" ping="{{MOCK_URL}}/probe/ping">link</a>
+</div>`;
+
+export const PROBE_PREFIX = '/probe/';
+export const probeHtml = (baseUrl: string): string => PROBE_TAGS.replaceAll('{{MOCK_URL}}', baseUrl);
 
 export interface MockQuip {
   url: string;
@@ -25,6 +50,8 @@ export interface MockQuip {
   requests: RecordedRequest[];
   /** Requests of any method other than GET: must always stay empty. */
   mutating(): RecordedRequest[];
+  /** Requests for anything under `/probe/`: sub-resources the extension must never load. */
+  probeHits(): RecordedRequest[];
   close(): Promise<void>;
 }
 
@@ -52,6 +79,8 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
   const requests: RecordedRequest[] = [];
   const now = opts.now ?? Date.now;
   let authorised = 0;
+  let baseUrl = '';
+  const servedHtml = (html: string): string => `${html}${opts.probe ? PROBE_TAGS : ''}`.replaceAll('{{MOCK_URL}}', baseUrl);
 
   const send = (res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
     const isBuf = body instanceof Uint8Array;
@@ -68,11 +97,16 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
   };
   const userJson = (id: string): Record<string, unknown> | undefined => [ME, ANN, BOB].find((u) => u.id === id) && userInfo([ME, ANN, BOB].find((u) => u.id === id) as { id: string; name: string });
 
-  const server = http.createServer((req, res) => {
+  const handle = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     const url = new URL(req.url ?? '/', 'http://mock');
     const rec: RecordedRequest = { method: req.method ?? '', path: url.pathname, query: Object.fromEntries(url.searchParams), auth: req.headers.authorization ?? '' };
     requests.push(rec);
     if (rec.method !== 'GET') return error(res, 405, 'method not allowed');
+    if (rec.path === '/control.html') {
+      // A same-origin page for tests that need a live document next to the mock.
+      res.writeHead(200, { 'content-type': 'text/html' });
+      return void res.end('<!doctype html><title>control</title><body></body>');
+    }
     if (rec.auth !== `Bearer ${TOKEN}`) return error(res, 401, 'Invalid access_token');
 
     authorised += 1;
@@ -140,8 +174,9 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
       const cursor = q.get('cursor');
       const index = cursor ? Number(cursor.replace('page', '')) : 0;
       if (!cursor && t.pages.length === 0) return send(res, 200, { html: '', response_metadata: {} });
-      const html = t.pages[index];
-      if (html === undefined) return error(res, 400, 'bad cursor');
+      const page = t.pages[index];
+      if (page === undefined) return error(res, 400, 'bad cursor');
+      const html = servedHtml(page);
       return send(res, 200, { html, response_metadata: index + 1 < t.pages.length ? { next_cursor: `page${index + 1}` } : {} });
     }
     if ((m = /^\/2\/threads\/([\w-]+)$/.exec(path))) {
@@ -171,15 +206,18 @@ export async function startMockQuip(opts: MockOptions = {}): Promise<MockQuip> {
       return fx.threads[m[1] as string]?.type === 'SLIDES' ? send(res, 200, new TextEncoder().encode('%PDF-1.4\n%slides\n'), { 'content-type': 'application/pdf' }) : error(res, 400, 'not a slide deck');
     }
     return error(res, 404, `no route for ${path}`);
-  });
+  };
+  const server = http.createServer((req, res) => (opts.delayMs ? void setTimeout(() => handle(req, res), opts.delayMs) : handle(req, res)));
 
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
+  baseUrl = `http://127.0.0.1:${port}`;
   return {
-    url: `http://127.0.0.1:${port}`,
+    url: baseUrl,
     fixture: fx,
     requests,
     mutating: () => requests.filter((r) => r.method !== 'GET'),
+    probeHits: () => requests.filter((r) => r.path.startsWith(PROBE_PREFIX)),
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

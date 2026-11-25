@@ -11,9 +11,9 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "activeTab", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["storage", "activeTab", "declarativeNetRequest"],
   "host_permissions": ["https://platform.quip.com/*"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; base-uri 'none'; form-action 'none'"
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://platform.quip.com; frame-src 'none'; base-uri 'none'; form-action 'none'"
   }
 }
