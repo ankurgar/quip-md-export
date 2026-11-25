@@ -118,6 +118,36 @@ describe('links, images and attachments', () => {
   });
 });
 
+describe('nested emphasis', () => {
+  it('does not wrap an already bold span in a second pair of marks', () => {
+    expect(md('<p><b><b>Hello</b></b> <b>world</b></p>')).toBe('**Hello** **world**');
+    expect(md('<p><b><span style="font-weight:bold">Hello</span> and <i>more</i></b></p>')).toBe('**Hello and *more***');
+  });
+});
+
+describe('date controls', () => {
+  it('renders a date that Quip keeps in an attribute, and lets visible content win when there is some', () => {
+    expect(md('<p>Complete by <control date-ms="1550448000000" id="c1"></control>.</p>')).toBe('Complete by 2019-02-18.');
+    expect(md('<p>Due <control date-ms="1550448000000">Feb 18</control></p>')).toBe('Due Feb 18');
+  });
+
+  it('knows the day when it is midnight in the reader\'s zone, and says when it had to guess', () => {
+    const control = '<p><control date-ms="1572892200000"></control></p>'; // 2019-11-05 00:00 in India
+    const known = convert(control, { timeZone: 'Asia/Kolkata' });
+    expect(known.markdown.trim()).toBe('2019-11-05');
+    expect(known.warnings).toEqual([]);
+    const guessed = convert(control, { timeZone: 'UTC' });
+    expect(guessed.markdown.trim()).toBe('2019-11-05');
+    expect(guessed.warnings.map((w) => w.code)).toEqual(['ambiguous-date']);
+  });
+
+  it('still flags a control with neither content nor a date', () => {
+    const r = convert('<p>x <control id="c2"></control></p>');
+    expect(r.markdown.trim()).toBe('x <!-- empty Quip control -->');
+    expect(r.warnings.map((w) => w.code)).toEqual(['empty-control']);
+  });
+});
+
 describe('several links to one document', () => {
   const id = 'AbCdEfGhIjKl';
   const SITE = 'https://acme.quip.com';
@@ -145,6 +175,12 @@ describe('several links to one document', () => {
 });
 
 describe('lists', () => {
+  it("drops the meaningless <br/> Quip puts at the end of every list item, but keeps a break inside one", () => {
+    // Shape seen in a real Quip export: <li><span>text</span>\n\n<br/></li>
+    const html = `<div data-section-style='5'><ul><li><span>First</span>\n\n<br/></li><li>two<br/>lines<br/></li><li><br/></li><li>Parent<br/><ul><li>Child<br/></li></ul></li></ul></div>`;
+    expect(md(html)).toBe('- First\n- two<br>lines\n- Parent\n  - Child');
+  });
+
   it('nests bullet lists and merges adjacent wrappers into one tight list', () => {
     const html = `<div data-section-style="5"><ul><li>A<ul><li>A1</li></ul></li></ul></div><div data-section-style="5"><ul><li>B</li></ul></div>`;
     expect(md(html)).toBe('- A\n  - A1\n- B');

@@ -12,7 +12,7 @@ import type { BlobRef, FolderMeta, ThreadMeta, Warning } from './types';
 export const TOOL_NAME = 'quip-md-export';
 export const TOOL_VERSION = '0.1.0';
 /** Bump whenever the converter or note format changes, so existing notes are re-rendered on the next run. */
-export const FORMAT_VERSION = 3;
+export const FORMAT_VERSION = 5;
 export const STATE_PATH = '.quip-md-export/state.json';
 export const REPORT_JSON_PATH = '.quip-md-export/report.json';
 export const REPORT_MD_PATH = '_Quip export report.md';

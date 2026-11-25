@@ -20,9 +20,12 @@ function indentFor(state: Walk, depth: number): string {
   return s;
 }
 
+/** Quip ends every list item with a <br/> that means nothing. A break in the middle of an item is kept. */
+const EDGE_BREAKS = /^(?:\s*<br>)+\s*|(?:\s*<br>)+\s*$/g;
+
 function itemText(cx: Cx, li: Element): string {
   const nodes = Array.from(li.childNodes).filter((n) => !(n.nodeType === 1 && isListTag(n as Element)));
-  return escapeBlockStart(renderInlineNodes(cx, nodes, LIST_MODE).trim());
+  return escapeBlockStart(renderInlineNodes(cx, nodes, LIST_MODE).replace(EDGE_BREAKS, '').trim());
 }
 
 function walkContainer(cx: Cx, container: Element, kind: ListKind, depth: number, state: Walk, continueNumbering: boolean): void {

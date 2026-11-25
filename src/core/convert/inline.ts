@@ -1,10 +1,15 @@
 import { codeSpan, collapseWs, escapeInline, linkDest, stripZeroWidth } from '../markdownUtils';
 import type { Cx } from './context';
+import { dayFromEpoch } from './dates';
 import { classifyUrl } from './urls';
 
 /** How a `<br>` is rendered: hard break in paragraphs, `<br>` in tables/lists, space in headings. */
 export interface InlineMode {
   br: 'hard' | 'html' | 'space';
+  /** Set while rendering inside an element that is already bold, italic or struck through, so nesting adds no second pair of marks. */
+  bold?: boolean;
+  italic?: boolean;
+  strike?: boolean;
 }
 
 const tagOf = (el: Element): string => el.tagName.toLowerCase();
@@ -98,6 +103,9 @@ export function renderInlineNode(cx: Cx, node: Node, mode: InlineMode): string {
       // Quip wraps attachments, dates and mentions in <control>. One that renders to nothing is flagged, never silently dropped.
       const inner = renderInline(cx, el, mode);
       if (inner.trim() !== '') return inner;
+      // A date control can keep its date in an attribute and nothing as content.
+      const day = el.hasAttribute('date-ms') ? dayFromEpoch(el.getAttribute('date-ms'), cx.opts.timeZone, (guess) => cx.warn('ambiguous-date', guess)) : undefined;
+      if (day) return day;
       cx.warn('empty-control', el.getAttribute('data-remapped') ?? el.getAttribute('id') ?? '');
       return '<!-- empty Quip control -->';
     }
@@ -105,16 +113,16 @@ export function renderInlineNode(cx: Cx, node: Node, mode: InlineMode): string {
       break;
   }
 
-  let out = renderInline(cx, el, mode);
   const flags = styleFlags(el);
   const isBold = tag === 'b' || tag === 'strong' || flags.bold;
   const isItalic = tag === 'i' || tag === 'em' || tag === 'cite' || flags.italic;
   const isStrike = tag === 's' || tag === 'strike' || tag === 'del' || flags.strike;
   const isUnderline = tag === 'u' || tag === 'ins' || (flags.underline && !isStrike && tag !== 'a');
+  let out = renderInline(cx, el, { ...mode, ...(isBold ? { bold: true } : {}), ...(isItalic ? { italic: true } : {}), ...(isStrike ? { strike: true } : {}) });
   if (isUnderline) out = wrapMarks('<u>', out, '</u>');
-  if (isStrike) out = wrapMarks('~~', out);
-  if (isItalic) out = wrapMarks('*', out);
-  if (isBold) out = wrapMarks('**', out);
+  if (isStrike && !mode.strike) out = wrapMarks('~~', out);
+  if (isItalic && !mode.italic) out = wrapMarks('*', out);
+  if (isBold && !mode.bold) out = wrapMarks('**', out);
   if (tag === 'sup') out = wrapMarks('<sup>', out, '</sup>');
   if (tag === 'sub') out = wrapMarks('<sub>', out, '</sub>');
   return out;

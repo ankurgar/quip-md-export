@@ -116,6 +116,32 @@ describe('project tracker', () => {
   });
 });
 
+describe('apps seen in a real account', () => {
+  it('renders the calendar app that has no payload and no events', () => {
+    const html = app('JbNAjAZ14no', undefined, '<details><summary></summary><div>No Calendar Events</div></details>');
+    const r = convert(html);
+    expect(r.markdown.trimEnd()).toBe('**Calendar**\n\n*No events.*');
+    expect(r.embeds).toEqual({ calendar: 1 });
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('renders the video app as a link to the video', () => {
+    const dump = `<details><summary></summary><ul><details><summary>Body</summary><pre style="white-space: pre-wrap"><code>elementBody:\n  jsonData:\n    videoUrl:\n      t: 0\n      v: https://quip.wistia.com/medias/5yjzrcxaiy\n  localId: abc\n</code></pre></details></ul></details>`;
+    const r = convert(app('RNLAjA8V1C2', undefined, dump));
+    expect(r.markdown.trimEnd()).toBe('**Video**\n\n<https://quip.wistia.com/medias/5yjzrcxaiy>');
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('keeps the text of markup the block renderer cannot place, instead of calling it empty', () => {
+    const dump = `<details><summary></summary><ul><details><summary>Body</summary><pre><code>alpha: 1\nbeta: 2</code></pre></details></ul></details>`;
+    const r = convert(app('zzzUnknown5', undefined, dump));
+    expect(r.markdown).toContain('alpha: 1\nbeta: 2');
+    expect(r.warnings.map((w) => w.code)).not.toContain('live-app-no-data');
+    const plain = convert(app('zzzUnknown6', undefined, '<details><summary></summary><span>just words</span></details>'));
+    expect(plain.markdown).toContain('just words');
+  });
+});
+
 describe('date handling', () => {
   it('recovers the intended calendar day for local-midnight timestamps in any time zone', () => {
     const pst = Date.UTC(2020, 10, 18, 8, 0, 0); // midnight at UTC-8
