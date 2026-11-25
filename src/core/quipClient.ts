@@ -81,7 +81,6 @@ type Query = Record<string, string | number | boolean | undefined>;
 /** Thread, folder, user and secret-path ids are 11-12 base-62 characters; verbs like "new" or "add-members" never match. */
 const ENTITY_ID_RE = /^[A-Za-z0-9]{8,32}$/;
 const BLOB_ID_RE = /^[\w-]{8,64}$/;
-const WAIT_STEP_MS = 15_000;
 const MAX_WAIT_MS = 3_600_000;
 
 const defaultSleep = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -175,19 +174,19 @@ export class QuipClient implements QuipApi {
 
   private async pace(): Promise<void> {
     const wait = Math.max(this.nextSlot, this.blockedUntil) - this.now();
-    if (wait > 0) await this.waitStepwise(wait, 'rate-limit', '');
+    if (wait > 0) await this.waitFor(wait, 'rate-limit', '');
     this.nextSlot = Math.max(this.now(), this.nextSlot) + this.minInterval;
   }
 
-  /** Sleeps in short steps so the UI can show a countdown and Stop stays responsive. */
-  private async waitStepwise(totalMs: number, reason: 'rate-limit' | 'service' | 'network', path: string): Promise<void> {
-    let left = Math.min(totalMs, MAX_WAIT_MS);
-    while (left > 0) {
-      const step = Math.min(left, WAIT_STEP_MS);
-      if (step >= 1000 || reason !== 'rate-limit') this.onEvent?.({ type: 'throttle', waitMs: left, reason, path });
-      await this.sleepFn(step, this.signal);
-      left -= step;
-    }
+  /**
+   * One abortable sleep, announced once so the UI can run its own countdown. Short polling steps
+   * would be stretched by the browser's background-tab timer throttling.
+   */
+  private async waitFor(totalMs: number, reason: 'rate-limit' | 'service' | 'network', path: string): Promise<void> {
+    const ms = Math.min(totalMs, MAX_WAIT_MS);
+    if (ms <= 0) return;
+    if (ms >= 1000 || reason !== 'rate-limit') this.onEvent?.({ type: 'throttle', waitMs: ms, reason, path });
+    await this.sleepFn(ms, this.signal);
   }
 
   private async send(path: string, query: Query, accept: string): Promise<Response> {
@@ -208,7 +207,7 @@ export class QuipClient implements QuipApi {
       } catch (err) {
         if (this.signal?.aborted) throw err;
         if (attempt >= this.maxRetries) throw new Error(`Network error for ${path}: ${this.redact(String(err))}`);
-        await this.waitStepwise(Math.min(30_000, 1000 * 2 ** attempt), 'network', path);
+        await this.waitFor(Math.min(30_000, 1000 * 2 ** attempt), 'network', path);
         continue;
       }
 
@@ -220,12 +219,12 @@ export class QuipClient implements QuipApi {
         const wait = this.throttleDelay(res.headers);
         if (wait !== undefined) {
           this.blockedUntil = this.now() + wait;
-          await this.waitStepwise(wait, 'rate-limit', path);
+          await this.waitFor(wait, 'rate-limit', path);
           continue;
         }
       }
       if (res.status >= 500 && attempt < this.maxRetries) {
-        await this.waitStepwise(Math.min(30_000, 1000 * 2 ** attempt), 'service', path);
+        await this.waitFor(Math.min(30_000, 1000 * 2 ** attempt), 'service', path);
         continue;
       }
       const detail = this.redact(await res.text().catch(() => ''));

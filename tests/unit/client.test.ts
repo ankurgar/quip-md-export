@@ -140,12 +140,12 @@ describe('rate limiting and errors', () => {
     expect(events.some((e) => e.type === 'throttle' && e.reason === 'rate-limit')).toBe(true);
   });
 
-  it('honours Retry-After, and splits very long waits into short steps so Stop stays responsive', async () => {
+  it('honours Retry-After with a single abortable sleep and announces it once', async () => {
     let n = 0;
-    const { c, clock } = client(() => (++n === 1 ? json({}, 429, { 'retry-after': '40' }) : json({ id: 'u1', name: 'Me' })));
+    const { c, clock, events } = client(() => (++n === 1 ? json({}, 429, { 'retry-after': '40' }) : json({ id: 'u1', name: 'Me' })));
     await c.currentUser();
-    expect(clock.slept.every((ms) => ms <= 15_000)).toBe(true);
-    expect(clock.slept.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(40_000);
+    expect(clock.slept).toEqual([41_000]);
+    expect(events.filter((e) => e.type === 'throttle')).toEqual([expect.objectContaining({ waitMs: 41_000, reason: 'rate-limit' })]);
   });
 
   it('after a response that spends the quota, delays the next request instead of provoking a 503', async () => {

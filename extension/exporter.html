@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Quip to Markdown exporter</title>
+    <link rel="stylesheet" href="exporter.css" />
+  </head>
+  <body data-state="loading">
+    <main>
+      <header>
+        <h1>Quip → Markdown</h1>
+        <p class="lede">
+          Copies your Quip folders and documents into a folder on this computer as Markdown files, including calendars, Kanban boards,
+          project trackers and spreadsheets.
+        </p>
+        <p class="safe">
+          <strong>Read-only.</strong> This tool only asks Quip to <em>read</em> things. It cannot create, edit or delete a Quip document, and it never
+          deletes files from your target folder.
+        </p>
+        <p id="guard-status" class="status" data-tone="info"></p>
+      </header>
+
+      <section id="step-connect">
+        <h2><span class="n">1</span> Connect to Quip</h2>
+        <p class="hint">
+          Create a personal access token at
+          <a href="https://quip.com/dev/token" target="_blank" rel="noreferrer noopener">quip.com/dev/token</a> while signed in, and paste it
+          here. It is only ever sent to Quip.
+        </p>
+        <div class="row">
+          <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Quip access token" aria-label="Quip access token" />
+          <button id="btn-connect" type="button">Connect</button>
+        </div>
+        <label class="check"><input id="remember" type="checkbox" /><span>Remember the token on this computer</span></label>
+        <p id="connect-status" class="status" role="status" data-tone="info"></p>
+      </section>
+
+      <section id="step-target">
+        <h2><span class="n">2</span> Choose the target folder</h2>
+        <div class="row">
+          <button id="btn-pick" type="button">Choose folder…</button>
+          <button id="btn-regrant" type="button" hidden>Allow access again</button>
+          <span id="target-name" class="mono"></span>
+        </div>
+        <p id="target-hint" class="hint">Quip's folder structure is recreated inside it. A new, empty folder or an Obsidian vault works well.</p>
+      </section>
+
+      <section id="step-scope">
+        <h2><span class="n">3</span> Choose what to export</h2>
+        <div id="page-scope" hidden>
+          <label class="check"><input id="scope-page" type="radio" name="scope" /><span>Only what I was viewing, with everything inside it</span><small id="page-label"></small></label>
+          <label class="check"><input id="scope-all" type="radio" name="scope" checked /><span>The folders selected below</span></label>
+        </div>
+        <fieldset id="roots"><legend>Folders</legend><p class="hint">Connect first to list your folders.</p></fieldset>
+        <fieldset class="options">
+          <legend>Options</legend>
+          <label class="check"><input id="opt-comments" type="checkbox" checked /><span>Include comments and conversation</span></label>
+          <label class="check"><input id="opt-raw" type="checkbox" checked /><span>Keep Quip's original HTML and metadata (<code>.quip-raw</code>) so nothing is lost</span></label>
+          <label class="check"><input id="opt-unfiled" type="checkbox" checked /><span>Include documents that are in no folder</span></label>
+          <label class="check"><input id="opt-skip" type="checkbox" checked /><span>Skip documents unchanged since the last export</span></label>
+          <label class="check"><span>Limit to the first</span><input id="opt-max" type="number" min="1" step="1" placeholder="all" class="narrow" /><span>documents (useful for a trial run)</span></label>
+        </fieldset>
+        <div class="row">
+          <button id="btn-scan" type="button">Scan</button>
+          <span id="scan-status" class="status" role="status" data-tone="info"></span>
+        </div>
+        <pre id="scan-summary" hidden></pre>
+      </section>
+
+      <section id="step-run">
+        <h2><span class="n">4</span> Export</h2>
+        <div class="row">
+          <button id="btn-run" type="button" class="primary">Start export</button>
+          <button id="btn-stop" type="button" disabled>Stop</button>
+        </div>
+        <progress id="progress" value="0" max="1"></progress>
+        <p id="run-status" class="status" role="status" data-tone="info"></p>
+        <p class="hint">Keep this tab open while exporting. You can stop at any time and continue later; finished documents are not downloaded again.</p>
+        <ol id="log" class="log" aria-label="Export log"></ol>
+      </section>
+
+      <footer>Quip → Markdown exporter <span id="version"></span></footer>
+    </main>
+    <script type="module" src="exporter.js"></script>
+  </body>
+</html>

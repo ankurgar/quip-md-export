@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Quip to Markdown Exporter",
+  "version": "0.1.0",
+  "description": "Read-only: copies your Quip folders and documents into a local folder as Markdown, including calendars, Kanban boards, project trackers and spreadsheets.",
+  "minimum_chrome_version": "110",
+  "action": {
+    "default_title": "Export Quip to Markdown"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "activeTab", "declarativeNetRequestWithHostAccess"],
+  "host_permissions": ["https://platform.quip.com/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; base-uri 'none'; form-action 'none'"
+  }
+}
