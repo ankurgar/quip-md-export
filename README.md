@@ -2,6 +2,8 @@
 
 *A charm that turns your Quip folders into Markdown, before Quip goes away.*
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/ankurgar)
+
 **Quipendo** is a Chrome (Manifest V3) extension, and a command line version of the same code, that copy your Quip folders and documents into a folder on your computer as Markdown, keeping Quip's folder structure. It also converts embedded content that other exporters drop: **calendars, Kanban boards, project trackers, process bars, embedded and standalone spreadsheets**, comments, images and file attachments.
 
 **It is read-only.** It cannot create, edit or delete anything in Quip, and it never deletes files from your target folder or overwrites a file it did not create. See [Read-only guarantees](#read-only-guarantees).
@@ -178,6 +180,10 @@ The token is kept in browser session storage and disappears when the browser clo
 - Comments are fetched newest first by timestamp. If a whole page of comments shares one microsecond timestamp, Quip offers no way to page past it, so the report warns `comments-incomplete`; this is not expected in practice.
 - Quip's `updated_usec` decides whether a document changed; documents whose live-app content changes without bumping it are not re-exported unless you untick *Skip unchanged*.
 - Browsers throttle timers in background tabs; waiting out a rate limit may be a little late but is never early.
+
+## Support
+
+If Quipendo saved your Quip documents, you can [sponsor it on GitHub](https://github.com/sponsors/ankurgar), once or monthly. Reports of Quip content that did not convert well help just as much: a small snippet from `.quip-raw/` with anything private removed is enough to add a converter.
 
 ## Prior art
 
